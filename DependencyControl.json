@@ -1,0 +1,40 @@
+{
+  "dependencyControlFeedFormatVersion": "0.3.0",
+  "name": "Tenebris-Magi's Aegisub Scripts",
+  "description": "Repository for Aegisub automation scripts by Magi.",
+  "maintainer": "Magi",
+  "knownFeeds": {
+    "aegisub": "https://raw.githubusercontent.com/TypesettingTools/DependencyControl/master/knownFeeds.json"
+  },
+  "baseUrl": "https://raw.githubusercontent.com/Tenebris-Magi/Aegisub-Scripts",
+  "url": "https://github.com/Tenebris-Magi/Aegisub-Scripts",
+  "fileBaseUrl": "@{baseUrl}/main",
+  "macros": {
+    "Magi.AutoPhone": {
+      "url": "@{url}",
+      "author": "Magi",
+      "name": "AutoPhone",
+      "description": "Automates positioned phone chat signs with perspective-matched bubbles, seamless tails, usernames, read indicators, and optional auto-wrapping.",
+      "channels": {
+        "release": {
+          "version": "2.1.1",
+          "released": "2026-11-21",
+          "default": true,
+          "files": [
+            {
+              "name": ".lua",
+              "url": "@{fileBaseUrl}/macros/@{namespace}@{name}",
+              "sha1": "425302387c1a0c636f86b83007d615d38fa6240f"
+            }
+          ],
+          "requiredModules": []
+        }
+      },
+      "changelog": {
+        "2.1.1": [
+          "Initial DependencyControl release."
+        ]
+      }
+    }
+  }
+}
