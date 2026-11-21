@@ -2,6 +2,14 @@ script_name = "AutoPhone"
 script_description = "Automates positioned phone chat signs with perspective-matched bubbles, seamless tails, usernames, read indicators, and optional auto-wrapping."
 script_author = "Magi"
 script_version = "2.1.1"
+script_namespace = "Magi.AutoPhone"
+
+local haveDepCtrl, DependencyControl, depRec = pcall(require, "l0.DependencyControl")
+if haveDepCtrl then
+    depRec = DependencyControl {
+        feed = "https://raw.githubusercontent.com/Tenebris-Magi/Aegisub-Scripts/main/DependencyControl.json"
+    }
+end
 
 include("karaskel.lua")
 
@@ -1058,4 +1066,8 @@ local function run_phone_sign(sub, sel)
     return new_sel
 end
 
-aegisub.register_macro(script_name, script_description, run_phone_sign)
+if haveDepCtrl then
+    depRec:registerMacro(run_phone_sign)
+else
+    aegisub.register_macro(script_name, script_description, run_phone_sign)
+end
