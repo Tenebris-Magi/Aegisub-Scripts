@@ -1,7 +1,8 @@
 script_name = "AutoPhone"
-script_description = "Automates positioned phone chat signs with perspective-matched bubbles, seamless tails, usernames, read indicators, and optional auto-wrapping."
+script_description = "Automates positioned phone chat signs with perspective-matched bubbles, customizable seamless balloon tails, usernames, read indicators, multi-line avatars, and optional auto-wrapping."
 script_author = "Magi"
-script_version = "2.1.1"
+script_version = "0.3.1"
+
 script_namespace = "Magi.AutoPhone"
 
 local haveDepCtrl, DependencyControl, depRec = pcall(require, "l0.DependencyControl")
@@ -43,17 +44,23 @@ local DEFAULT_CONFIG = {
     read_color         = "#888888",
     read_size_pct      = 65,
 
-    -- Left bubble arrow
+    -- Avatar
+    avatar_size        = 48,
+    avatar_gap         = 10,
+
+    -- Left balloon tail
     left_arrow_enable  = false,
     left_arrow_size    = 12,
-    left_arrow_pos     = "Top",
-    left_arrow_curved  = true,
+    left_arrow_pos     = "Near Top",
+    left_arrow_curve   = 50,
+    left_arrow_dir     = "Bottom to Top",
 
-    -- Right bubble arrow
+    -- Right balloon tail
     right_arrow_enable = false,
     right_arrow_size   = 12,
-    right_arrow_pos    = "Top",
-    right_arrow_curved = true
+    right_arrow_pos    = "Near Top",
+    right_arrow_curve  = 50,
+    right_arrow_dir    = "Bottom to Top"
 }
 
 local function load_config()
@@ -147,7 +154,7 @@ local function get_layout_res_y(sub, fallback_res_y)
 end
 
 -- ============================================================================
--- ASS Tag & Vector Clip Parsing
+-- ASS Tag, Effect, Read & Multi-Line Avatar Parsing
 -- ============================================================================
 
 local function extract_clip_points(text)
@@ -216,6 +223,7 @@ local function extract_base_tags(text, style)
     ox = ox and tonumber(ox) or nil
     oy = oy and tonumber(oy) or nil
 
+    local an  = get_num([=[\an(%d)]=], style.align or 2)
     local fs  = get_num([=[\fs(%d+%.?%d*)]=], nil)
     local fsp = get_num([=[\fsp([%-]?%d+%.?%d*)]=], nil)
     local fn  = tags:match([=[\fn([^\}]+)]=])
@@ -233,11 +241,55 @@ local function extract_base_tags(text, style)
         py   = py,
         ox   = ox,
         oy   = oy,
+        an   = an,
         fs   = fs,
         fsp  = fsp,
         fn   = fn,
         b    = b,
         i    = i
+    }
+end
+
+local function anchor_y_to_top(py, an, block_h)
+    local v_align = math.floor((an - 1) / 3)
+    if v_align == 1 then
+        return py - (block_h / 2)
+    elseif v_align == 0 then
+        return py - block_h
+    end
+    return py
+end
+
+local function parse_effect(eff_raw)
+    local eff = trim(eff_raw):lower()
+    local has_left, has_right, has_read, has_avatar = false, false, false, false
+
+    for tok in eff:gmatch("[^%s,]+") do
+        if tok == "left" or tok == "l" then
+            has_left = true
+        elseif tok == "right" or tok == "r" then
+            has_right = true
+        elseif tok == "read" then
+            has_read = true
+        elseif tok == "avatar" then
+            has_avatar = true
+        end
+    end
+
+    if has_read and (not has_left) and (not has_right) and (not has_avatar) then
+        return { is_read_template = true }
+    end
+
+    if has_avatar and (not has_left) and (not has_right) and (not has_read) then
+        return { is_avatar_template = true }
+    end
+
+    return {
+        is_read_template   = false,
+        is_avatar_template = false,
+        is_right           = has_right,
+        has_read           = has_read,
+        has_avatar         = has_avatar
     }
 end
 
@@ -316,18 +368,141 @@ local function parse_read_template(raw_text)
     }
 end
 
-local function parse_effect(eff_raw)
-    local eff = trim(eff_raw):lower():gsub("%s+", " ")
-    if eff == "read" then
-        return { is_read_template = true }
+local function extract_visual_tags(raw_text)
+    local all_tags = ""
+    for block in raw_text:gmatch("{([^}]*)}") do
+        all_tags = all_tags .. block
     end
 
-    local is_right = (eff == "right" or eff == "r" or eff == "right read" or eff == "r read")
-    local has_read = (eff == "left read" or eff == "l read" or eff == "right read" or eff == "r read")
+    local kept = {}
+    local has_bord = false
+    local has_shad = false
+
+    for tag in all_tags:gmatch([=[\[^\]+]=]) do
+        local is_layout =
+            tag:match([=[^\an%d]=]) or
+            tag:match([=[^\a%d]=]) or
+            tag:match([=[^\pos%(]=]) or
+            tag:match([=[^\move%(]=]) or
+            tag:match([=[^\org%(]=]) or
+            tag:match([=[^\fr[xyz]?[%-%d%.]]=]) or
+            tag:match([=[^\fa[xy][%-%d%.]]=]) or
+            tag:match([=[^\fsc[xy][%-%d%.]]=]) or
+            tag:match([=[^\p%d]=]) or
+            tag:match([=[^\i?clip%(]=])
+
+        if not is_layout then
+            table.insert(kept, tag)
+            if tag:match([=[^\x?y?bord]=]) then has_bord = true end
+            if tag:match([=[^\x?y?shad]=]) then has_shad = true end
+        end
+    end
+
+    if not has_bord then table.insert(kept, [=[\bord0]=]) end
+    if not has_shad then table.insert(kept, [=[\shad0]=]) end
+
+    return table.concat(kept, "")
+end
+
+local function compile_avatar_group(raw_lines)
+    if not raw_lines or #raw_lines == 0 then
+        return nil
+    end
+
+    local parsed_parts = {}
+    local ref_px, ref_py = nil, nil
+    local min_x, min_y = math.huge, math.huge
+    local max_x, max_y = -math.huge, -math.huge
+    local min_layer = math.huge
+
+    for _, line in ipairs(raw_lines) do
+        local tags = ""
+        for block in line.text:gmatch("{([^}]*)}") do
+            tags = tags .. block
+        end
+
+        local p_level = tonumber(tags:match([=[\p([1-9]%d*)]=]))
+        local clean = trim(line.text:gsub("{[^}]*}", ""))
+
+        if p_level and clean ~= "" then
+            local scale_p = 2 ^ (p_level - 1)
+            local fscx = tonumber(tags:match([=[\fscx([%-]?%d+%.?%d*)]=])) or 100
+            local fscy = tonumber(tags:match([=[\fscy([%-]?%d+%.?%d*)]=])) or 100
+
+            local px, py = tags:match([=[\pos%(([%-%d%.]+)%s*,%s*([%-%d%.]+)%)]=])
+            px = px and tonumber(px) or nil
+            py = py and tonumber(py) or nil
+
+            if px and py and not ref_px then
+                ref_px, ref_py = px, py
+            end
+            local off_x = (px and ref_px) and (px - ref_px) or 0
+            local off_y = (py and ref_py) and (py - ref_py) or 0
+
+            local tokens = {}
+            local is_x = true
+            for tok in clean:gmatch("%S+") do
+                local num = tonumber(tok)
+                if num then
+                    if is_x then
+                        local ux = (num / scale_p) * (fscx / 100.0) + off_x
+                        if ux < min_x then min_x = ux end
+                        if ux > max_x then max_x = ux end
+                        table.insert(tokens, { is_num = true, is_x = true, val = ux })
+                    else
+                        local uy = (num / scale_p) * (fscy / 100.0) + off_y
+                        if uy < min_y then min_y = uy end
+                        if uy > max_y then max_y = uy end
+                        table.insert(tokens, { is_num = true, is_x = false, val = uy })
+                    end
+                    is_x = not is_x
+                else
+                    table.insert(tokens, { is_num = false, text = tok })
+                    is_x = true
+                end
+            end
+
+            if line.layer < min_layer then
+                min_layer = line.layer
+            end
+
+            table.insert(parsed_parts, {
+                tokens      = tokens,
+                layer       = line.layer,
+                style       = line.style,
+                visual_tags = extract_visual_tags(line.text)
+            })
+        end
+    end
+
+    if #parsed_parts == 0 or min_x == math.huge then
+        return nil
+    end
+
+    local final_parts = {}
+    for _, part in ipairs(parsed_parts) do
+        local str_tokens = {}
+        for _, t in ipairs(part.tokens) do
+            if t.is_num then
+                local shifted = t.is_x and (t.val - min_x) or (t.val - min_y)
+                table.insert(str_tokens, fmt(shifted))
+            else
+                table.insert(str_tokens, t.text)
+            end
+        end
+
+        table.insert(final_parts, {
+            drawing      = table.concat(str_tokens, " "),
+            layer_offset = part.layer - min_layer,
+            style        = part.style,
+            visual_tags  = part.visual_tags
+        })
+    end
+
     return {
-        is_read_template = false,
-        is_right         = is_right,
-        has_read         = has_read
+        parts  = final_parts,
+        width  = math.max(1, max_x - min_x),
+        height = math.max(1, max_y - min_y)
     }
 end
 
@@ -407,7 +582,6 @@ local function format_and_measure_text(clean_text, measure_style, ignore_breaks,
         working = trim(working:gsub([=[\N]=], " "):gsub("%s+", " "))
     end
 
-    -- Split into paragraphs on \N
     local paragraphs = {}
     local start_idx = 1
     while true do
@@ -461,188 +635,366 @@ local function format_and_measure_text(clean_text, measure_style, ignore_breaks,
 end
 
 -- ============================================================================
--- Single-Contour Seamless Bubble + Arrow Drawing (\p1)
+-- Single-Contour Seamless Bubble + Customizable Balloon Tail Drawing (\p1)
 -- ============================================================================
+-- Positions: "Top", "Near Top", "Middle", "Near Bottom", "Bottom"
+-- Curvature: 0 (straight) to 100 (strong curve)
+-- Direction: "Bottom to Top" (sweeps upward) or "Top to Bottom" (sweeps downward)
 
-local function build_box_drawing(w, h, radius, is_right, arrow_enable, arrow_size, arrow_pos, arrow_curved)
-    local has_arrow = arrow_enable and (arrow_size or 0) > 0
-    local s = has_arrow and arrow_size or 0
+local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size, tail_pos, tail_curve_pct, tail_dir)
+    local has_tail = tail_enable and (tail_size or 0) > 0
+    local s = has_tail and tail_size or 0
+    local c = math.max(0, math.min(100, tail_curve_pct or 0)) / 100.0
+    local sweep_up = (tail_dir ~= "Top to Bottom")
     local r = math.max(0, math.min(radius or 0, w / 2, h / 2))
 
-    local r_tl, r_tr, r_br, r_bl = r, r, r, r
-    if has_arrow and arrow_pos == "Middle" then
-        local min_base = math.min(h * 0.6, s * 1.1)
-        local max_side_r = math.max(0, (h - min_base) / 2)
-        if is_right then
-            r_tr = math.min(r_tr, max_side_r)
-            r_br = math.min(r_br, max_side_r)
-        else
-            r_tl = math.min(r_tl, max_side_r)
-            r_bl = math.min(r_bl, max_side_r)
-        end
-    end
+    local is_side_pos = (tail_pos == "Near Top" or tail_pos == "Middle" or tail_pos == "Near Bottom")
+    local is_tl = has_tail and (not is_right) and (tail_pos == "Top")
+    local is_bl = has_tail and (not is_right) and (tail_pos == "Bottom")
+    local is_sl = has_tail and (not is_right) and is_side_pos
+    local is_tr = has_tail and is_right and (tail_pos == "Top")
+    local is_br = has_tail and is_right and (tail_pos == "Bottom")
+    local is_sr = has_tail and is_right and is_side_pos
 
-    local is_tl = has_arrow and (not is_right) and (arrow_pos == "Top")
-    local is_bl = has_arrow and (not is_right) and (arrow_pos == "Bottom")
-    local is_ml = has_arrow and (not is_right) and (arrow_pos == "Middle")
-    local is_tr = has_arrow and is_right and (arrow_pos == "Top")
-    local is_br = has_arrow and is_right and (arrow_pos == "Bottom")
-    local is_mr = has_arrow and is_right and (arrow_pos == "Middle")
-
-    local K = 0.55228475
     local cmds = {}
     local function add(str) table.insert(cmds, str) end
 
+    -- Exact clockwise circular-arc cubic Bezier from angle a1 to a2 (screen coords: +x right, +y down)
+    local function add_arc(cx, cy, rad, a1, a2)
+        if rad < 0.5 or math.abs(a2 - a1) < 1e-4 then
+            return
+        end
+        local d  = rad * (4.0 / 3.0) * math.tan((a2 - a1) / 4.0)
+        local x1 = cx + rad * math.cos(a1)
+        local y1 = cy + rad * math.sin(a1)
+        local x2 = cx + rad * math.cos(a2)
+        local y2 = cy + rad * math.sin(a2)
+        local c1x = x1 - d * math.sin(a1)
+        local c1y = y1 + d * math.cos(a1)
+        local c2x = x2 + d * math.sin(a2)
+        local c2y = y2 - d * math.cos(a2)
+        add(string.format("b %s %s %s %s %s %s", fmt(c1x), fmt(c1y), fmt(c2x), fmt(c2y), fmt(x2), fmt(y2)))
+    end
+
+    local function clamp_unit(v)
+        return math.max(-1, math.min(1, v))
+    end
+
+    -- Exact x and corner angle along Right edge (including Top-Right and Bottom-Right rounded corners)
+    local function right_boundary_at(y)
+        if r >= 0.5 and y < r then
+            local a = math.asin(clamp_unit((y - r) / r)) -- [-pi/2, 0]
+            return (w - r) + r * math.cos(a), a
+        elseif r >= 0.5 and y > h - r then
+            local a = math.asin(clamp_unit((y - (h - r)) / r)) -- [0, pi/2]
+            return (w - r) + r * math.cos(a), a
+        end
+        return w, nil
+    end
+
+    -- Exact x and corner angle along Left edge (including Bottom-Left and Top-Left rounded corners)
+    local function left_boundary_at(y)
+        if r >= 0.5 and y > h - r then
+            local a = math.pi - math.asin(clamp_unit((y - (h - r)) / r)) -- [pi/2, pi]
+            return r + r * math.cos(a), a
+        elseif r >= 0.5 and y < r then
+            local a = math.pi - math.asin(clamp_unit((y - r) / r)) -- [pi, 3*pi/2]
+            return r + r * math.cos(a), a
+        end
+        return 0, nil
+    end
+
+    -- Vertical span for Near Top / Middle / Near Bottom (independent of corner radius!)
+    local function side_tail_span()
+        local base_h = math.min(h * 0.45, s * 1.15)
+        local inset  = math.max(3, math.min(10, h * 0.12))
+        local top_y
+        if tail_pos == "Near Top" then
+            top_y = inset
+        elseif tail_pos == "Near Bottom" then
+            top_y = h - inset - base_h
+        else
+            top_y = (h - base_h) / 2
+        end
+        top_y = math.max(0.5, math.min(top_y, h - base_h - 0.5))
+        return top_y, top_y + base_h, base_h
+    end
+
+    local HALF_PI = math.pi / 2
     local ax = math.min(w * 0.5, math.max(r, s * 0.9))
     local ay = math.min(h * 0.5, math.max(r, s * 1.15))
 
-    local top_start_x = is_tl and ax or r_tl
+    local top_start_x = is_tl and ax or r
     add(string.format("m %s 0", fmt(top_start_x)))
 
-    -- 1. Top edge -> Top-Right corner (or Top-Right arrow)
-    if is_tr then
-        local tr_x = math.max(top_start_x, w - ax)
-        local tr_y = math.min(h - r_br, ay)
-        add(string.format("l %s 0", fmt(tr_x)))
-        if arrow_curved then
-            add(string.format(
-                "b %s %s %s 0 %s 0 b %s %s %s %s %s %s",
-                fmt(w - (w - tr_x) * 0.25), fmt(s * 0.08),
-                fmt(w + s * 0.35),
-                fmt(w + s),
-                fmt(w + s * 0.35), fmt(tr_y * 0.12),
-                fmt(w), fmt(tr_y * 0.45),
-                fmt(w), fmt(tr_y)
-            ))
-        else
-            add(string.format("l %s 0 %s %s", fmt(w + s), fmt(w), fmt(tr_y)))
-        end
-    else
-        add(string.format("l %s 0", fmt(w - r_tr)))
-        if r_tr >= 0.5 then
-            local c = r_tr * (1 - K)
-            add(string.format("b %s 0 %s %s %s %s", fmt(w - c), fmt(w), fmt(c), fmt(w), fmt(r_tr)))
-        end
-    end
+    -- ========================================================================
+    -- RIGHT HALF: (top_start_x, 0) -> (w - r, h) [or (br_x, h)]
+    -- ========================================================================
+    if is_sr then
+        local top_y, bot_y, base_h = side_tail_span()
+        local mid_y = (top_y + bot_y) / 2
+        local x_top, a_top = right_boundary_at(top_y)
+        local x_bot, a_bot = right_boundary_at(bot_y)
 
-    -- 2. Right edge (with optional Middle-Right arrow)
-    if is_mr then
-        local mid_y = h / 2
-        local half_b = math.min((h - r_tr - r_br) / 2, s * 0.6)
-        local top_y = mid_y - half_b
-        local bot_y = mid_y + half_b
-        add(string.format("l %s %s", fmt(w), fmt(top_y)))
-        if arrow_curved then
+        -- Top edge to Top-Right corner start
+        add(string.format("l %s 0", fmt(w - r)))
+
+        -- Approach (x_top, top_y) along Top-Right corner / Right edge / Bottom-Right corner
+        if r >= 0.5 and top_y < r then
+            add_arc(w - r, r, r, -HALF_PI, a_top)
+        elseif r >= 0.5 and top_y > h - r then
+            add_arc(w - r, r, r, -HALF_PI, 0)
+            add(string.format("l %s %s", fmt(w), fmt(h - r)))
+            add_arc(w - r, h - r, r, 0, a_top)
+        else
+            add_arc(w - r, r, r, -HALF_PI, 0)
+            add(string.format("l %s %s", fmt(w), fmt(top_y)))
+        end
+
+        -- Seamless Right-side tail from (x_top, top_y) to (x_bot, bot_y)
+        local x_tip = w + s
+        local dx_t  = x_tip - x_top
+        local dx_b  = x_tip - x_bot
+        if c < 0.01 then
+            add(string.format("l %s %s %s %s", fmt(x_tip), fmt(mid_y), fmt(x_bot), fmt(bot_y)))
+        elseif sweep_up then
+            local tip_y = mid_y - base_h * 0.55 * c
             add(string.format(
                 "b %s %s %s %s %s %s b %s %s %s %s %s %s",
-                fmt(w + s * 0.25), fmt(top_y + half_b * 0.45),
-                fmt(w + s * 0.65), fmt(mid_y - half_b * 0.18),
-                fmt(w + s), fmt(mid_y),
-                fmt(w + s * 0.65), fmt(mid_y + half_b * 0.18),
-                fmt(w + s * 0.25), fmt(bot_y - half_b * 0.45),
-                fmt(w), fmt(bot_y)
+                fmt(x_top + dx_t * (0.20 + 0.15 * c)), fmt(top_y + base_h * 0.18 * c),
+                fmt(x_top + dx_t * (0.55 + 0.15 * c)), fmt(tip_y + base_h * 0.18 * c),
+                fmt(x_tip), fmt(tip_y),
+                fmt(x_bot + dx_b * (0.70 + 0.20 * c)), fmt(tip_y + (bot_y - tip_y) * (0.45 + 0.25 * c)),
+                fmt(x_bot + dx_b * (0.30 + 0.35 * c)), fmt(bot_y - base_h * 0.05 * c),
+                fmt(x_bot), fmt(bot_y)
             ))
         else
-            add(string.format("l %s %s %s %s", fmt(w + s), fmt(mid_y), fmt(w), fmt(bot_y)))
-        end
-    end
-
-    -- 3. Bottom-Right corner (or Bottom-Right arrow)
-    if is_br then
-        local br_y = math.max(r_tr, h - ay)
-        local br_x = math.max(r_bl, w - ax)
-        add(string.format("l %s %s", fmt(w), fmt(br_y)))
-        if arrow_curved then
+            local tip_y = mid_y + base_h * 0.55 * c
             add(string.format(
                 "b %s %s %s %s %s %s b %s %s %s %s %s %s",
-                fmt(w), fmt(br_y + (h - br_y) * 0.55),
-                fmt(w + s * 0.35), fmt(h - (h - br_y) * 0.12),
-                fmt(w + s), fmt(h),
-                fmt(w + s * 0.35), fmt(h),
-                fmt(w - (w - br_x) * 0.25), fmt(h - s * 0.08),
-                fmt(br_x), fmt(h)
+                fmt(x_top + dx_t * (0.30 + 0.35 * c)), fmt(top_y + base_h * 0.05 * c),
+                fmt(x_top + dx_t * (0.70 + 0.20 * c)), fmt(tip_y - (tip_y - top_y) * (0.45 + 0.25 * c)),
+                fmt(x_tip), fmt(tip_y),
+                fmt(x_bot + dx_b * (0.55 + 0.15 * c)), fmt(tip_y - base_h * 0.18 * c),
+                fmt(x_bot + dx_b * (0.20 + 0.15 * c)), fmt(bot_y - base_h * 0.18 * c),
+                fmt(x_bot), fmt(bot_y)
             ))
+        end
+
+        -- Finish from (x_bot, bot_y) to (w - r, h)
+        if r >= 0.5 and bot_y < r then
+            add_arc(w - r, r, r, a_bot, 0)
+            add(string.format("l %s %s", fmt(w), fmt(h - r)))
+            add_arc(w - r, h - r, r, 0, HALF_PI)
+        elseif r >= 0.5 and bot_y > h - r then
+            add_arc(w - r, h - r, r, a_bot, HALF_PI)
         else
-            add(string.format("l %s %s %s %s", fmt(w + s), fmt(h), fmt(br_x), fmt(h)))
+            add(string.format("l %s %s", fmt(w), fmt(h - r)))
+            add_arc(w - r, h - r, r, 0, HALF_PI)
         end
     else
-        add(string.format("l %s %s", fmt(w), fmt(h - r_br)))
-        if r_br >= 0.5 then
-            local c = r_br * (1 - K)
-            add(string.format("b %s %s %s %s %s %s", fmt(w), fmt(h - c), fmt(w - c), fmt(h), fmt(w - r_br), fmt(h)))
+        -- 1. Top edge -> Top-Right corner (or Top-Right tail)
+        if is_tr then
+            local tr_x = math.max(top_start_x, w - ax)
+            local tr_y = math.min(h - r, ay)
+            add(string.format("l %s 0", fmt(tr_x)))
+            if c < 0.01 then
+                add(string.format("l %s 0 %s %s", fmt(w + s), fmt(w), fmt(tr_y)))
+            elseif sweep_up then
+                add(string.format(
+                    "b %s %s %s %s %s 0 b %s %s %s %s %s %s",
+                    fmt(w - (w - tr_x) * 0.25), fmt(s * 0.14 * c),
+                    fmt(w + s * (0.35 + 0.15 * c)), fmt(s * 0.18 * c),
+                    fmt(w + s),
+                    fmt(w + s * (0.35 + 0.45 * c)), fmt(tr_y * (0.35 - 0.25 * c)),
+                    fmt(w + s * 0.15 * c), fmt(tr_y * (1 - 0.55 * c)),
+                    fmt(w), fmt(tr_y)
+                ))
+            else
+                local tip_y = tr_y * 0.35 * c
+                add(string.format(
+                    "b %s 0 %s %s %s %s b %s %s %s %s %s %s",
+                    fmt(w - (w - tr_x) * 0.20),
+                    fmt(w + s * (0.45 + 0.25 * c)), fmt(tip_y * (1 - 0.65 * c)),
+                    fmt(w + s), fmt(tip_y),
+                    fmt(w + s * (0.55 + 0.15 * c)), fmt(tip_y + (tr_y - tip_y) * 0.15),
+                    fmt(w + s * (0.20 + 0.15 * c)), fmt(tr_y - (tr_y - tip_y) * 0.30),
+                    fmt(w), fmt(tr_y)
+                ))
+            end
+        else
+            add(string.format("l %s 0", fmt(w - r)))
+            add_arc(w - r, r, r, -HALF_PI, 0)
+        end
+
+        -- 2. Right edge -> Bottom-Right corner (or Bottom-Right tail)
+        if is_br then
+            local br_y = math.max(r, h - ay)
+            local br_x = math.max(r, w - ax)
+            local dy = h - br_y
+            add(string.format("l %s %s", fmt(w), fmt(br_y)))
+            if c < 0.01 then
+                add(string.format("l %s %s %s %s", fmt(w + s), fmt(h), fmt(br_x), fmt(h)))
+            elseif not sweep_up then
+                add(string.format(
+                    "b %s %s %s %s %s %s b %s %s %s %s %s %s",
+                    fmt(w + s * 0.15 * c), fmt(br_y + dy * 0.55 * c),
+                    fmt(w + s * (0.35 + 0.45 * c)), fmt(h - dy * (0.35 - 0.25 * c)),
+                    fmt(w + s), fmt(h),
+                    fmt(w + s * (0.35 + 0.15 * c)), fmt(h - s * 0.18 * c),
+                    fmt(w - (w - br_x) * 0.25), fmt(h - s * 0.14 * c),
+                    fmt(br_x), fmt(h)
+                ))
+            else
+                local tip_y = h - dy * 0.35 * c
+                add(string.format(
+                    "b %s %s %s %s %s %s b %s %s %s %s %s %s",
+                    fmt(w + s * (0.20 + 0.15 * c)), fmt(br_y + (tip_y - br_y) * 0.30),
+                    fmt(w + s * (0.55 + 0.15 * c)), fmt(tip_y - (tip_y - br_y) * 0.15),
+                    fmt(w + s), fmt(tip_y),
+                    fmt(w + s * (0.45 + 0.25 * c)), fmt(h - (h - tip_y) * (1 - 0.65 * c)),
+                    fmt(w - (w - br_x) * 0.20), fmt(h),
+                    fmt(br_x), fmt(h)
+                ))
+            end
+        else
+            add(string.format("l %s %s", fmt(w), fmt(h - r)))
+            add_arc(w - r, h - r, r, 0, HALF_PI)
         end
     end
 
-    -- 4. Bottom edge -> Bottom-Left corner (or Bottom-Left arrow)
-    if is_bl then
-        local bl_x = math.min(w - r_br, ax)
-        local bl_y = math.max(r_tl, h - ay)
-        add(string.format("l %s %s", fmt(bl_x), fmt(h)))
-        if arrow_curved then
+    -- ========================================================================
+    -- LEFT HALF: bottom edge -> (top_start_x, 0)
+    -- ========================================================================
+    if is_sl then
+        local top_y, bot_y, base_h = side_tail_span()
+        local mid_y = (top_y + bot_y) / 2
+        local x_top, a_top = left_boundary_at(top_y)
+        local x_bot, a_bot = left_boundary_at(bot_y)
+
+        -- Bottom edge to Bottom-Left corner start
+        add(string.format("l %s %s", fmt(r), fmt(h)))
+
+        -- Approach (x_bot, bot_y) going upward along Bottom-Left corner / Left edge / Top-Left corner
+        if r >= 0.5 and bot_y > h - r then
+            add_arc(r, h - r, r, HALF_PI, a_bot)
+        elseif r >= 0.5 and bot_y < r then
+            add_arc(r, h - r, r, HALF_PI, math.pi)
+            add(string.format("l 0 %s", fmt(r)))
+            add_arc(r, r, r, math.pi, a_bot)
+        else
+            add_arc(r, h - r, r, HALF_PI, math.pi)
+            add(string.format("l 0 %s", fmt(bot_y)))
+        end
+
+        -- Seamless Left-side tail from (x_bot, bot_y) to (x_top, top_y)
+        local x_tip = -s
+        local dx_b  = x_bot - x_tip
+        local dx_t  = x_top - x_tip
+        if c < 0.01 then
+            add(string.format("l %s %s %s %s", fmt(x_tip), fmt(mid_y), fmt(x_top), fmt(top_y)))
+        elseif sweep_up then
+            local tip_y = mid_y - base_h * 0.55 * c
             add(string.format(
-                "b %s %s %s %s %s %s b %s %s 0 %s 0 %s",
-                fmt(bl_x * 0.25), fmt(h - s * 0.08),
-                fmt(-s * 0.35), fmt(h),
-                fmt(-s), fmt(h),
-                fmt(-s * 0.35), fmt(h - (h - bl_y) * 0.12),
-                fmt(bl_y + (h - bl_y) * 0.55),
-                fmt(bl_y)
+                "b %s %s %s %s %s %s b %s %s %s %s %s %s",
+                fmt(x_bot - dx_b * (0.30 + 0.35 * c)), fmt(bot_y - base_h * 0.05 * c),
+                fmt(x_bot - dx_b * (0.70 + 0.20 * c)), fmt(tip_y + (bot_y - tip_y) * (0.45 + 0.25 * c)),
+                fmt(x_tip), fmt(tip_y),
+                fmt(x_top - dx_t * (0.55 + 0.15 * c)), fmt(tip_y + base_h * 0.18 * c),
+                fmt(x_top - dx_t * (0.20 + 0.15 * c)), fmt(top_y + base_h * 0.18 * c),
+                fmt(x_top), fmt(top_y)
             ))
         else
-            add(string.format("l %s %s 0 %s", fmt(-s), fmt(h), fmt(bl_y)))
+            local tip_y = mid_y + base_h * 0.55 * c
+            add(string.format(
+                "b %s %s %s %s %s %s b %s %s %s %s %s %s",
+                fmt(x_bot - dx_b * (0.20 + 0.15 * c)), fmt(bot_y - base_h * 0.18 * c),
+                fmt(x_bot - dx_b * (0.55 + 0.15 * c)), fmt(tip_y - base_h * 0.18 * c),
+                fmt(x_tip), fmt(tip_y),
+                fmt(x_top - dx_t * (0.70 + 0.20 * c)), fmt(tip_y - (tip_y - top_y) * (0.45 + 0.25 * c)),
+                fmt(x_top - dx_t * (0.30 + 0.35 * c)), fmt(top_y + base_h * 0.05 * c),
+                fmt(x_top), fmt(top_y)
+            ))
+        end
+
+        -- Finish from (x_top, top_y) to (r, 0)
+        if r >= 0.5 and top_y > h - r then
+            add_arc(r, h - r, r, a_top, math.pi)
+            add(string.format("l 0 %s", fmt(r)))
+            add_arc(r, r, r, math.pi, 3 * HALF_PI)
+        elseif r >= 0.5 and top_y < r then
+            add_arc(r, r, r, a_top, 3 * HALF_PI)
+        else
+            add(string.format("l 0 %s", fmt(r)))
+            add_arc(r, r, r, math.pi, 3 * HALF_PI)
         end
     else
-        add(string.format("l %s %s", fmt(r_bl), fmt(h)))
-        if r_bl >= 0.5 then
-            local c = r_bl * (1 - K)
-            add(string.format("b %s %s 0 %s 0 %s", fmt(c), fmt(h), fmt(h - c), fmt(h - r_bl)))
-        end
-    end
-
-    -- 5. Left edge (with optional Middle-Left arrow)
-    if is_ml then
-        local mid_y = h / 2
-        local half_b = math.min((h - r_tl - r_bl) / 2, s * 0.6)
-        local top_y = mid_y - half_b
-        local bot_y = mid_y + half_b
-        add(string.format("l 0 %s", fmt(bot_y)))
-        if arrow_curved then
-            add(string.format(
-                "b %s %s %s %s %s %s b %s %s %s %s 0 %s",
-                fmt(-s * 0.25), fmt(bot_y - half_b * 0.45),
-                fmt(-s * 0.65), fmt(mid_y + half_b * 0.18),
-                fmt(-s), fmt(mid_y),
-                fmt(-s * 0.65), fmt(mid_y - half_b * 0.18),
-                fmt(-s * 0.25), fmt(top_y + half_b * 0.45),
-                fmt(top_y)
-            ))
+        -- 3. Bottom edge -> Bottom-Left corner (or Bottom-Left tail)
+        if is_bl then
+            local bl_x = math.min(w - r, ax)
+            local bl_y = math.max(r, h - ay)
+            local dy = h - bl_y
+            add(string.format("l %s %s", fmt(bl_x), fmt(h)))
+            if c < 0.01 then
+                add(string.format("l %s %s 0 %s", fmt(-s), fmt(h), fmt(bl_y)))
+            elseif not sweep_up then
+                add(string.format(
+                    "b %s %s %s %s %s %s b %s %s %s %s 0 %s",
+                    fmt(bl_x * 0.25), fmt(h - s * 0.14 * c),
+                    fmt(-s * (0.35 + 0.15 * c)), fmt(h - s * 0.18 * c),
+                    fmt(-s), fmt(h),
+                    fmt(-s * (0.35 + 0.45 * c)), fmt(h - dy * (0.35 - 0.25 * c)),
+                    fmt(-s * 0.15 * c), fmt(bl_y + dy * 0.55 * c),
+                    fmt(bl_y)
+                ))
+            else
+                local tip_y = h - dy * 0.35 * c
+                add(string.format(
+                    "b %s %s %s %s %s %s b %s %s %s %s 0 %s",
+                    fmt(bl_x * 0.20), fmt(h),
+                    fmt(-s * (0.45 + 0.25 * c)), fmt(h - (h - tip_y) * (1 - 0.65 * c)),
+                    fmt(-s), fmt(tip_y),
+                    fmt(-s * (0.55 + 0.15 * c)), fmt(tip_y - (tip_y - bl_y) * 0.15),
+                    fmt(-s * (0.20 + 0.15 * c)), fmt(bl_y + (tip_y - bl_y) * 0.30),
+                    fmt(bl_y)
+                ))
+            end
         else
-            add(string.format("l %s %s 0 %s", fmt(-s), fmt(mid_y), fmt(top_y)))
+            add(string.format("l %s %s", fmt(r), fmt(h)))
+            add_arc(r, h - r, r, HALF_PI, math.pi)
         end
-    end
 
-    -- 6. Top-Left corner (or Top-Left arrow) closing back to (top_start_x, 0)
-    if is_tl then
-        local tl_y = math.min(h - r_bl, ay)
-        add(string.format("l 0 %s", fmt(tl_y)))
-        if arrow_curved then
-            add(string.format(
-                "b 0 %s %s %s %s 0 b %s 0 %s %s %s 0",
-                fmt(tl_y * 0.45),
-                fmt(-s * 0.35), fmt(tl_y * 0.12),
-                fmt(-s),
-                fmt(-s * 0.35),
-                fmt(top_start_x * 0.25), fmt(s * 0.08),
-                fmt(top_start_x)
-            ))
+        -- 4. Left edge -> Top-Left corner (or Top-Left tail)
+        if is_tl then
+            local tl_y = math.min(h - r, ay)
+            add(string.format("l 0 %s", fmt(tl_y)))
+            if c < 0.01 then
+                add(string.format("l %s 0 %s 0", fmt(-s), fmt(top_start_x)))
+            elseif sweep_up then
+                add(string.format(
+                    "b %s %s %s %s %s 0 b %s %s %s %s %s 0",
+                    fmt(-s * 0.15 * c), fmt(tl_y * (1 - 0.55 * c)),
+                    fmt(-s * (0.35 + 0.45 * c)), fmt(tl_y * (0.35 - 0.25 * c)),
+                    fmt(-s),
+                    fmt(-s * (0.35 + 0.15 * c)), fmt(s * 0.18 * c),
+                    fmt(top_start_x * 0.25), fmt(s * 0.14 * c),
+                    fmt(top_start_x)
+                ))
+            else
+                local tip_y = tl_y * 0.35 * c
+                add(string.format(
+                    "b %s %s %s %s %s %s b %s %s %s 0 %s 0",
+                    fmt(-s * (0.20 + 0.15 * c)), fmt(tl_y - (tl_y - tip_y) * 0.30),
+                    fmt(-s * (0.55 + 0.15 * c)), fmt(tip_y + (tl_y - tip_y) * 0.15),
+                    fmt(-s), fmt(tip_y),
+                    fmt(-s * (0.45 + 0.25 * c)), fmt(tip_y * (1 - 0.65 * c)),
+                    fmt(top_start_x * 0.20),
+                    fmt(top_start_x)
+                ))
+            end
         else
-            add(string.format("l %s 0 %s 0", fmt(-s), fmt(top_start_x)))
-        end
-    else
-        add(string.format("l 0 %s", fmt(r_tl)))
-        if r_tl >= 0.5 then
-            local c = r_tl * (1 - K)
-            add(string.format("b 0 %s %s 0 %s 0", fmt(c), fmt(c), fmt(r_tl)))
+            add(string.format("l 0 %s", fmt(r)))
+            add_arc(r, r, r, math.pi, 3 * HALF_PI)
         end
     end
 
@@ -654,6 +1006,9 @@ end
 -- ============================================================================
 
 local function show_dialog(cfg)
+    local tail_pos_items = { "Top", "Near Top", "Middle", "Near Bottom", "Bottom" }
+    local tail_dir_items = { "Bottom to Top", "Top to Bottom" }
+
     local dialog_config = {
         -- Colors & Layout
         { class = "label", label = "Left Text Color:",  x = 0, y = 0, width = 1, height = 1 },
@@ -691,29 +1046,40 @@ local function show_dialog(cfg)
         { class = "label",    label = "Size (% of text):", x = 0, y = 8, width = 1, height = 1 },
         { class = "intedit",  name  = "username_size_pct", value = cfg.username_size_pct, min = 10, max = 200, x = 1, y = 8, width = 1, height = 1 },
 
-        -- Read Indicator
-        { class = "label",   label = "─── Read Indicator (Effect: Read / Left Read / Right Read) ───", x = 0, y = 9, width = 4, height = 1 },
-        { class = "label",   label = "Read Color:",       x = 0, y = 10, width = 1, height = 1 },
-        { class = "color",   name  = "read_color",        value = cfg.read_color, x = 1, y = 10, width = 1, height = 1 },
-        { class = "label",   label = "Read Size (%):",    x = 2, y = 10, width = 1, height = 1 },
-        { class = "intedit", name  = "read_size_pct",     value = cfg.read_size_pct, min = 10, max = 300, x = 3, y = 10, width = 1, height = 1 },
+        -- Read Indicator & Avatar
+        { class = "label",     label = "─── Read & Avatar (Effect: Read / Avatar) ───", x = 0, y = 9, width = 4, height = 1 },
+        { class = "label",     label = "Read Color:",       x = 0, y = 10, width = 1, height = 1 },
+        { class = "color",     name  = "read_color",        value = cfg.read_color, x = 1, y = 10, width = 1, height = 1 },
+        { class = "label",     label = "Read Size (%):",    x = 2, y = 10, width = 1, height = 1 },
+        { class = "intedit",   name  = "read_size_pct",     value = cfg.read_size_pct, min = 10, max = 300, x = 3, y = 10, width = 1, height = 1 },
 
-        -- Bubble Arrows
-        { class = "label",     label = "─── Bubble Arrows (Tails) ───", x = 0, y = 11, width = 4, height = 1 },
+        { class = "label",     label = "Avatar Size (px):", x = 0, y = 11, width = 1, height = 1 },
+        { class = "floatedit", name  = "avatar_size",       value = cfg.avatar_size, min = 8, max = 300, x = 1, y = 11, width = 1, height = 1 },
+        { class = "label",     label = "Avatar Gap (px):",  x = 2, y = 11, width = 1, height = 1 },
+        { class = "floatedit", name  = "avatar_gap",        value = cfg.avatar_gap, min = 0, max = 200, x = 3, y = 11, width = 1, height = 1 },
 
-        { class = "checkbox",  name  = "left_arrow_enable",  label = "Left Arrow",   value = cfg.left_arrow_enable, x = 0, y = 12, width = 1, height = 1 },
-        { class = "checkbox",  name  = "left_arrow_curved",  label = "Curved",       value = cfg.left_arrow_curved, x = 1, y = 12, width = 1, height = 1 },
-        { class = "label",     label = "Left Size (px):",    x = 2, y = 12, width = 1, height = 1 },
-        { class = "floatedit", name  = "left_arrow_size",    value = cfg.left_arrow_size, min = 1, max = 100, x = 3, y = 12, width = 1, height = 1 },
-        { class = "label",     label = "Left Arrow Pos:",    x = 0, y = 13, width = 1, height = 1 },
-        { class = "dropdown",  name  = "left_arrow_pos",     items = { "Top", "Middle", "Bottom" }, value = cfg.left_arrow_pos, x = 1, y = 13, width = 1, height = 1 },
+        -- Balloon Tails
+        { class = "label",     label = "─── Balloon Tails ───", x = 0, y = 12, width = 4, height = 1 },
 
-        { class = "checkbox",  name  = "right_arrow_enable", label = "Right Arrow",  value = cfg.right_arrow_enable, x = 0, y = 14, width = 1, height = 1 },
-        { class = "checkbox",  name  = "right_arrow_curved", label = "Curved",       value = cfg.right_arrow_curved, x = 1, y = 14, width = 1, height = 1 },
-        { class = "label",     label = "Right Size (px):",   x = 2, y = 14, width = 1, height = 1 },
-        { class = "floatedit", name  = "right_arrow_size",   value = cfg.right_arrow_size, min = 1, max = 100, x = 3, y = 14, width = 1, height = 1 },
-        { class = "label",     label = "Right Arrow Pos:",   x = 0, y = 15, width = 1, height = 1 },
-        { class = "dropdown",  name  = "right_arrow_pos",    items = { "Top", "Middle", "Bottom" }, value = cfg.right_arrow_pos, x = 1, y = 15, width = 1, height = 1 }
+        { class = "checkbox",  name  = "left_arrow_enable",  label = "Left Tail",         value = cfg.left_arrow_enable, x = 0, y = 13, width = 1, height = 1 },
+        { class = "dropdown",  name  = "left_arrow_pos",     items = tail_pos_items,      value = cfg.left_arrow_pos, x = 1, y = 13, width = 1, height = 1 },
+        { class = "label",     label = "Left Tail Size (px):", x = 2, y = 13, width = 1, height = 1 },
+        { class = "floatedit", name  = "left_arrow_size",    value = cfg.left_arrow_size, min = 1, max = 100, x = 3, y = 13, width = 1, height = 1 },
+
+        { class = "label",     label = "Left Curve (%):",    x = 0, y = 14, width = 1, height = 1 },
+        { class = "intedit",   name  = "left_arrow_curve",   value = cfg.left_arrow_curve, min = 0, max = 100, x = 1, y = 14, width = 1, height = 1 },
+        { class = "label",     label = "Left Curve Dir:",    x = 2, y = 14, width = 1, height = 1 },
+        { class = "dropdown",  name  = "left_arrow_dir",     items = tail_dir_items,      value = cfg.left_arrow_dir, x = 3, y = 14, width = 1, height = 1 },
+
+        { class = "checkbox",  name  = "right_arrow_enable", label = "Right Tail",         value = cfg.right_arrow_enable, x = 0, y = 15, width = 1, height = 1 },
+        { class = "dropdown",  name  = "right_arrow_pos",    items = tail_pos_items,       value = cfg.right_arrow_pos, x = 1, y = 15, width = 1, height = 1 },
+        { class = "label",     label = "Right Tail Size (px):", x = 2, y = 15, width = 1, height = 1 },
+        { class = "floatedit", name  = "right_arrow_size",   value = cfg.right_arrow_size, min = 1, max = 100, x = 3, y = 15, width = 1, height = 1 },
+
+        { class = "label",     label = "Right Curve (%):",   x = 0, y = 16, width = 1, height = 1 },
+        { class = "intedit",   name  = "right_arrow_curve",  value = cfg.right_arrow_curve, min = 0, max = 100, x = 1, y = 16, width = 1, height = 1 },
+        { class = "label",     label = "Right Curve Dir:",   x = 2, y = 16, width = 1, height = 1 },
+        { class = "dropdown",  name  = "right_arrow_dir",    items = tail_dir_items,       value = cfg.right_arrow_dir, x = 3, y = 16, width = 1, height = 1 }
     }
 
     local btn, res = aegisub.dialog.display(dialog_config, { "Apply", "Cancel" })
@@ -760,21 +1126,53 @@ local function run_phone_sign(sub, sel)
         return sel
     end
 
-    -- 2. Scan selected lines for a "Read" template line (Effect == "Read")
-    --    If none is found, default to plain text "Read"
+    -- 2. Scan selected lines for "Read" and "Avatar" template lines
     local read_template = nil
+    local default_avatar_raw = {}
+    local actor_avatars_raw  = {}
+    local first_actor_key    = nil
+
     for _, line_num in ipairs(sel) do
-        local info = parse_effect(sub[line_num].effect)
-        if info.is_read_template then
-            read_template = parse_read_template(sub[line_num].text)
-            break
+        local line = sub[line_num]
+        local info = parse_effect(line.effect)
+        if info.is_read_template and not read_template then
+            read_template = parse_read_template(line.text)
+        elseif info.is_avatar_template then
+            local akey = trim(line.actor):lower()
+            if akey == "" then
+                table.insert(default_avatar_raw, line)
+            else
+                if not actor_avatars_raw[akey] then
+                    actor_avatars_raw[akey] = {}
+                    if not first_actor_key then first_actor_key = akey end
+                end
+                table.insert(actor_avatars_raw[akey], line)
+            end
         end
     end
+
+    -- Default Read fallback if no "Read" template line is selected
     if not read_template then
         read_template = {
             is_shape = false,
             text     = "Read"
         }
+    end
+
+    -- Compile multi-line avatars
+    local default_avatar = compile_avatar_group(default_avatar_raw)
+    local actor_avatars  = {}
+    for akey, raw_list in pairs(actor_avatars_raw) do
+        actor_avatars[akey] = compile_avatar_group(raw_list)
+    end
+    local fallback_avatar = default_avatar or (first_actor_key and actor_avatars[first_actor_key] or nil)
+
+    local function resolve_avatar(actor_str)
+        local akey = trim(actor_str):lower()
+        if akey ~= "" and actor_avatars[akey] then
+            return actor_avatars[akey]
+        end
+        return fallback_avatar
     end
 
     -- 3. Show GUI with remembered settings
@@ -789,6 +1187,8 @@ local function run_phone_sign(sub, sel)
     local spacing       = res.spacing
     local clip_margin   = res.clip_margin
     local corner_radius = res.corner_radius
+    local avatar_target = res.avatar_size
+    local avatar_gap    = res.avatar_gap
 
     local left_txt_ass  = html_to_ass_color(res.left_text_color)
     local left_box_ass  = html_to_ass_color(res.left_box_color)
@@ -870,7 +1270,7 @@ local function run_phone_sign(sub, sel)
 
     -- 7. Generate elements for all message lines
     local generated_lines = {}
-    local current_y = area_top + clip_margin
+    local current_y = base.py or (area_top + clip_margin)
 
     local UNAME_V_GAP = 4
     local UNAME_H_GAP = 8
@@ -881,15 +1281,18 @@ local function run_phone_sign(sub, sel)
         local eff_info = parse_effect(orig.effect)
         local clean_text = trim(orig.text:gsub("{[^}]*}", ""))
 
-        if (not eff_info.is_read_template) and (not (idx == 1 and clean_text == "")) then
-            local is_right = eff_info.is_right
-            local has_read = eff_info.has_read
+        local is_template = eff_info.is_read_template or eff_info.is_avatar_template
+        if (not is_template) and (not (idx == 1 and clean_text == "")) then
+            local is_right   = eff_info.is_right
+            local has_read   = eff_info.has_read
+            local has_avatar = eff_info.has_avatar
 
-            local arrow_enable = is_right and res.right_arrow_enable or res.left_arrow_enable
-            local arrow_size   = is_right and res.right_arrow_size   or res.left_arrow_size
-            local arrow_pos    = is_right and res.right_arrow_pos    or res.left_arrow_pos
-            local arrow_curved = is_right and res.right_arrow_curved or res.left_arrow_curved
-            local arrow_offset = (arrow_enable and arrow_size > 0) and arrow_size or 0
+            local tail_enable = is_right and res.right_arrow_enable or res.left_arrow_enable
+            local tail_size   = is_right and res.right_arrow_size   or res.left_arrow_size
+            local tail_pos    = is_right and res.right_arrow_pos    or res.left_arrow_pos
+            local tail_curve  = is_right and res.right_arrow_curve  or res.left_arrow_curve
+            local tail_dir    = is_right and res.right_arrow_dir    or res.left_arrow_dir
+            local tail_offset = (tail_enable and tail_size > 0) and tail_size or 0
 
             local actor_name = trim(orig.actor)
             local use_uname  = (actor_name ~= "" and res.username_mode ~= "Off")
@@ -898,41 +1301,25 @@ local function run_phone_sign(sub, sel)
                 uname_norm, uname_w, uname_h = format_and_measure_text(actor_name, uname_style, false, nil)
             end
 
+            -- Resolve multi-line avatar if requested on this line
+            local avatar_group = has_avatar and resolve_avatar(actor_name) or nil
+            local av_scale, av_w, av_h, av_shift = 1, 0, 0, 0
+            if avatar_group then
+                av_scale = avatar_target / math.max(avatar_group.width, avatar_group.height)
+                av_w     = avatar_group.width * av_scale
+                av_h     = avatar_group.height * av_scale
+                av_shift = av_w + avatar_gap
+            end
+
             local txt_color = is_right and right_txt_ass or left_txt_ass
             local box_color = is_right and right_box_ass or left_box_ass
 
-            local uname_line = nil
-            local box_y = current_y
-
-            -- If username is "Above", place it above the bubble first
-            if use_uname and res.username_mode == "Above" then
-                local uname_y = current_y
-                local u_left  = edge_x_at_y(tl, bl, uname_y) + clip_margin + arrow_offset
-                local u_right = edge_x_at_y(tr, br, uname_y) - clip_margin - arrow_offset
-                local uname_x = is_right and (u_right - uname_w) or u_left
-
-                uname_line = copy_table(orig)
-                uname_line.layer = orig.layer + 1
-                uname_line.text = string.format(
-                    [=[{\an7\pos(%s,%s)%s%s%s\1c%s}%s]=],
-                    fmt(uname_x), fmt(uname_y),
-                    persp_tags, uname_scale_tags, font_tags,
-                    uname_ass, uname_norm
-                )
-
-                box_y = uname_y + uname_h + UNAME_V_GAP
-            end
-
-            local raw_left   = edge_x_at_y(tl, bl, box_y)
-            local raw_right  = edge_x_at_y(tr, br, box_y)
-            local clip_w     = math.max(10, raw_right - raw_left)
-            local left_edge  = raw_left + clip_margin
-            local right_edge = raw_right - clip_margin
-
-            -- Calculate optional max text width from user-defined Clip %
+            -- Measure text first (using estimated Y for optional auto-wrap width)
+            local est_y = current_y
+            local est_clip_w = math.max(10, edge_x_at_y(tr, br, est_y) - edge_x_at_y(tl, bl, est_y))
             local max_text_w = nil
             if res.auto_wrap_enable then
-                local max_box_w = clip_w * (res.max_width_pct / 100.0)
+                local max_box_w = est_clip_w * (res.max_width_pct / 100.0)
                 max_text_w = math.max(10, max_box_w - (2 * pad))
             end
 
@@ -945,17 +1332,53 @@ local function run_phone_sign(sub, sel)
             local box_w = block_w + (2 * pad)
             local box_h = block_h + (2 * pad)
 
-            local box_x
-            if use_uname and res.username_mode == "Next to" then
-                local uname_y = box_y
-                local uname_x
-                if is_right then
-                    uname_x = right_edge - uname_w
-                    box_x = math.max(left_edge, uname_x - UNAME_H_GAP - arrow_offset - box_w)
+            -- Determine vertical coordinates for bubble, username, and avatar
+            local box_y, uname_y, avatar_y
+            if idx == 1 and base.py then
+                local text_top = anchor_y_to_top(base.py, base.an, block_h)
+                box_y = text_top - pad
+                if use_uname and res.username_mode == "Above" then
+                    uname_y  = box_y - UNAME_V_GAP - uname_h
+                    avatar_y = uname_y
                 else
-                    uname_x = left_edge
-                    box_x = uname_x + uname_w + UNAME_H_GAP + arrow_offset
+                    avatar_y = box_y
                 end
+            else
+                avatar_y = current_y
+                if use_uname and res.username_mode == "Above" then
+                    uname_y = current_y
+                    box_y   = uname_y + uname_h + UNAME_V_GAP
+                else
+                    box_y = current_y
+                end
+            end
+
+            local av_left_edge  = edge_x_at_y(tl, bl, avatar_y) + clip_margin
+            local av_right_edge = edge_x_at_y(tr, br, avatar_y) - clip_margin
+
+            -- 1) Generate multi-line avatar (if present)
+            if avatar_group then
+                local av_x = is_right and (av_right_edge - av_w) or av_left_edge
+                local av_fsc = fmt(av_scale * 100.0)
+                for _, part in ipairs(avatar_group.parts) do
+                    local av_line = copy_table(orig)
+                    av_line.layer = orig.layer + part.layer_offset
+                    av_line.text = string.format(
+                        [=[{\an7\pos(%s,%s)%s\fscx%s\fscy%s%s\p1}%s{\p0}]=],
+                        fmt(av_x), fmt(avatar_y),
+                        persp_tags, av_fsc, av_fsc,
+                        part.visual_tags, part.drawing
+                    )
+                    table.insert(generated_lines, av_line)
+                end
+            end
+
+            local uname_line = nil
+
+            if use_uname and res.username_mode == "Above" then
+                local u_left  = edge_x_at_y(tl, bl, uname_y) + clip_margin + av_shift + tail_offset
+                local u_right = edge_x_at_y(tr, br, uname_y) - clip_margin - av_shift - tail_offset
+                local uname_x = is_right and (u_right - uname_w) or u_left
 
                 uname_line = copy_table(orig)
                 uname_line.layer = orig.layer + 1
@@ -965,23 +1388,50 @@ local function run_phone_sign(sub, sel)
                     persp_tags, uname_scale_tags, font_tags,
                     uname_ass, uname_norm
                 )
+            end
+
+            local raw_left   = edge_x_at_y(tl, bl, box_y)
+            local raw_right  = edge_x_at_y(tr, br, box_y)
+            local left_edge  = raw_left + clip_margin
+            local right_edge = raw_right - clip_margin
+
+            local box_x
+            if use_uname and res.username_mode == "Next to" then
+                local u_y = box_y
+                local uname_x
+                if is_right then
+                    uname_x = right_edge - av_shift - uname_w
+                    box_x = math.max(left_edge, uname_x - UNAME_H_GAP - tail_offset - box_w)
+                else
+                    uname_x = left_edge + av_shift
+                    box_x = uname_x + uname_w + UNAME_H_GAP + tail_offset
+                end
+
+                uname_line = copy_table(orig)
+                uname_line.layer = orig.layer + 1
+                uname_line.text = string.format(
+                    [=[{\an7\pos(%s,%s)%s%s%s\1c%s}%s]=],
+                    fmt(uname_x), fmt(u_y),
+                    persp_tags, uname_scale_tags, font_tags,
+                    uname_ass, uname_norm
+                )
             else
                 if is_right then
-                    box_x = math.max(left_edge, right_edge - arrow_offset - box_w)
+                    box_x = math.max(left_edge, right_edge - av_shift - tail_offset - box_w)
                 else
-                    box_x = left_edge + arrow_offset
+                    box_x = left_edge + av_shift + tail_offset
                 end
             end
 
             local text_y = box_y + pad
             local text_x = box_x + pad + (base.fax * pad)
 
-            -- 1) Username line (if present)
+            -- 2) Username line (if present)
             if uname_line then
                 table.insert(generated_lines, uname_line)
             end
 
-            -- 2) Seamless bubble + arrow (\p1) on orig.layer
+            -- 3) Seamless bubble + customizable balloon tail (\p1) on orig.layer
             local box_line = copy_table(orig)
             box_line.layer = orig.layer
             box_line.text = string.format(
@@ -990,11 +1440,11 @@ local function run_phone_sign(sub, sel)
                 fmt(box_y),
                 persp_tags,
                 box_color,
-                build_box_drawing(box_w, box_h, corner_radius, is_right, arrow_enable, arrow_size, arrow_pos, arrow_curved)
+                build_box_drawing(box_w, box_h, corner_radius, is_right, tail_enable, tail_size, tail_pos, tail_curve, tail_dir)
             )
             table.insert(generated_lines, box_line)
 
-            -- 3) Message text on orig.layer + 1
+            -- 4) Message text on orig.layer + 1
             local txt_line = copy_table(orig)
             txt_line.layer = orig.layer + 1
             txt_line.text = string.format(
@@ -1009,7 +1459,7 @@ local function run_phone_sign(sub, sel)
             )
             table.insert(generated_lines, txt_line)
 
-            -- 4) Read indicator (uses "Read" template line if present, else defaults to "Read")
+            -- 5) Read indicator (uses "Read" template line if present, else defaults to "Read")
             if has_read and read_template then
                 local read_y = box_y + box_h - read_h
                 local fax_shift = base.fax * (read_y - box_y)
@@ -1040,16 +1490,19 @@ local function run_phone_sign(sub, sel)
                 table.insert(generated_lines, read_line)
             end
 
-            -- Advance vertical cursor directly below the tallest element on this row
+            -- Advance vertical cursor below the tallest element (bubble, username, or avatar)
             local row_bottom = box_y + box_h
             if use_uname and res.username_mode == "Next to" then
                 row_bottom = math.max(row_bottom, box_y + uname_h)
+            end
+            if avatar_group then
+                row_bottom = math.max(row_bottom, avatar_y + av_h)
             end
             current_y = row_bottom + spacing
         end
     end
 
-    -- 8. Replace original selected lines (also deletes Line 1 clip & Read template line)
+    -- 8. Replace original selected lines (deletes Line 1 clip, Read, and Avatar template lines)
     local insert_pos = sel[1]
     for i = #sel, 1, -1 do
         sub.delete(sel[i])
