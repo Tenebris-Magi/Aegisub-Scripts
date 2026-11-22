@@ -1,8 +1,7 @@
 script_name = "AutoPhone"
 script_description = "Automates positioned phone chat signs with perspective-matched bubbles, customizable seamless balloon tails, usernames, read indicators, multi-line avatars, and optional auto-wrapping."
 script_author = "Magi"
-script_version = "0.3.1"
-
+script_version = "0.5.0"
 script_namespace = "Magi.AutoPhone"
 
 local haveDepCtrl, DependencyControl, depRec = pcall(require, "l0.DependencyControl")
@@ -26,6 +25,7 @@ local DEFAULT_CONFIG = {
     right_text_color   = "#FFFFFF",
     right_box_color    = "#007AFF",
     padding            = 12,
+    padding_y          = 12,
     spacing            = 14,
     clip_margin        = 10,
     corner_radius      = 0,
@@ -47,10 +47,12 @@ local DEFAULT_CONFIG = {
     -- Avatar
     avatar_size        = 48,
     avatar_gap         = 10,
+    avatar_align       = "Top",
 
     -- Left balloon tail
     left_arrow_enable  = false,
     left_arrow_size    = 12,
+    left_arrow_height  = 14,
     left_arrow_pos     = "Near Top",
     left_arrow_curve   = 50,
     left_arrow_dir     = "Bottom to Top",
@@ -58,6 +60,7 @@ local DEFAULT_CONFIG = {
     -- Right balloon tail
     right_arrow_enable = false,
     right_arrow_size   = 12,
+    right_arrow_height = 14,
     right_arrow_pos    = "Near Top",
     right_arrow_curve  = 50,
     right_arrow_dir    = "Bottom to Top"
@@ -637,14 +640,12 @@ end
 -- ============================================================================
 -- Single-Contour Seamless Bubble + Customizable Balloon Tail Drawing (\p1)
 -- ============================================================================
--- Positions: "Top", "Near Top", "Middle", "Near Bottom", "Bottom"
--- Curvature: 0 (straight) to 100 (strong curve)
--- Direction: "Bottom to Top" (sweeps upward) or "Top to Bottom" (sweeps downward)
 
-local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size, tail_pos, tail_curve_pct, tail_dir)
-    local has_tail = tail_enable and (tail_size or 0) > 0
-    local s = has_tail and tail_size or 0
-    local c = math.max(0, math.min(100, tail_curve_pct or 0)) / 100.0
+local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_w, tail_h, tail_pos, tail_curve_pct, tail_dir)
+    local has_tail = tail_enable and (tail_w or 0) > 0 and (tail_h or 0) > 0
+    local s  = has_tail and tail_w or 0
+    local th = has_tail and tail_h or 0
+    local c  = math.max(0, math.min(100, tail_curve_pct or 0)) / 100.0
     local sweep_up = (tail_dir ~= "Top to Bottom")
     local r = math.max(0, math.min(radius or 0, w / 2, h / 2))
 
@@ -659,7 +660,6 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
     local cmds = {}
     local function add(str) table.insert(cmds, str) end
 
-    -- Exact clockwise circular-arc cubic Bezier from angle a1 to a2 (screen coords: +x right, +y down)
     local function add_arc(cx, cy, rad, a1, a2)
         if rad < 0.5 or math.abs(a2 - a1) < 1e-4 then
             return
@@ -680,34 +680,34 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
         return math.max(-1, math.min(1, v))
     end
 
-    -- Exact x and corner angle along Right edge (including Top-Right and Bottom-Right rounded corners)
     local function right_boundary_at(y)
         if r >= 0.5 and y < r then
-            local a = math.asin(clamp_unit((y - r) / r)) -- [-pi/2, 0]
+            local a = math.asin(clamp_unit((y - r) / r))
             return (w - r) + r * math.cos(a), a
         elseif r >= 0.5 and y > h - r then
-            local a = math.asin(clamp_unit((y - (h - r)) / r)) -- [0, pi/2]
+            local a = math.asin(clamp_unit((y - (h - r)) / r))
             return (w - r) + r * math.cos(a), a
         end
         return w, nil
     end
 
-    -- Exact x and corner angle along Left edge (including Bottom-Left and Top-Left rounded corners)
     local function left_boundary_at(y)
         if r >= 0.5 and y > h - r then
-            local a = math.pi - math.asin(clamp_unit((y - (h - r)) / r)) -- [pi/2, pi]
+            local a = math.pi - math.asin(clamp_unit((y - (h - r)) / r))
             return r + r * math.cos(a), a
         elseif r >= 0.5 and y < r then
-            local a = math.pi - math.asin(clamp_unit((y - r) / r)) -- [pi, 3*pi/2]
+            local a = math.pi - math.asin(clamp_unit((y - r) / r))
             return r + r * math.cos(a), a
         end
         return 0, nil
     end
 
-    -- Vertical span for Near Top / Middle / Near Bottom (independent of corner radius!)
     local function side_tail_span()
-        local base_h = math.min(h * 0.45, s * 1.15)
-        local inset  = math.max(3, math.min(10, h * 0.12))
+        local max_h     = math.max(1, h - 1)
+        local base_h    = math.min(max_h, math.max(1, th))
+        local max_inset = math.max(0, (h - base_h) / 2 - 0.5)
+        local inset     = math.min(max_inset, math.max(3, math.min(10, h * 0.12)))
+
         local top_y
         if tail_pos == "Near Top" then
             top_y = inset
@@ -722,13 +722,13 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
 
     local HALF_PI = math.pi / 2
     local ax = math.min(w * 0.5, math.max(r, s * 0.9))
-    local ay = math.min(h * 0.5, math.max(r, s * 1.15))
+    local ay = math.min(math.max(1, h - r), math.max(1, th))
 
     local top_start_x = is_tl and ax or r
     add(string.format("m %s 0", fmt(top_start_x)))
 
     -- ========================================================================
-    -- RIGHT HALF: (top_start_x, 0) -> (w - r, h) [or (br_x, h)]
+    -- RIGHT HALF
     -- ========================================================================
     if is_sr then
         local top_y, bot_y, base_h = side_tail_span()
@@ -736,10 +736,8 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
         local x_top, a_top = right_boundary_at(top_y)
         local x_bot, a_bot = right_boundary_at(bot_y)
 
-        -- Top edge to Top-Right corner start
         add(string.format("l %s 0", fmt(w - r)))
 
-        -- Approach (x_top, top_y) along Top-Right corner / Right edge / Bottom-Right corner
         if r >= 0.5 and top_y < r then
             add_arc(w - r, r, r, -HALF_PI, a_top)
         elseif r >= 0.5 and top_y > h - r then
@@ -751,7 +749,6 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
             add(string.format("l %s %s", fmt(w), fmt(top_y)))
         end
 
-        -- Seamless Right-side tail from (x_top, top_y) to (x_bot, bot_y)
         local x_tip = w + s
         local dx_t  = x_tip - x_top
         local dx_b  = x_tip - x_bot
@@ -781,7 +778,6 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
             ))
         end
 
-        -- Finish from (x_bot, bot_y) to (w - r, h)
         if r >= 0.5 and bot_y < r then
             add_arc(w - r, r, r, a_bot, 0)
             add(string.format("l %s %s", fmt(w), fmt(h - r)))
@@ -793,10 +789,9 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
             add_arc(w - r, h - r, r, 0, HALF_PI)
         end
     else
-        -- 1. Top edge -> Top-Right corner (or Top-Right tail)
         if is_tr then
             local tr_x = math.max(top_start_x, w - ax)
-            local tr_y = math.min(h - r, ay)
+            local tr_y = ay
             add(string.format("l %s 0", fmt(tr_x)))
             if c < 0.01 then
                 add(string.format("l %s 0 %s %s", fmt(w + s), fmt(w), fmt(tr_y)))
@@ -827,9 +822,8 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
             add_arc(w - r, r, r, -HALF_PI, 0)
         end
 
-        -- 2. Right edge -> Bottom-Right corner (or Bottom-Right tail)
         if is_br then
-            local br_y = math.max(r, h - ay)
+            local br_y = h - ay
             local br_x = math.max(r, w - ax)
             local dy = h - br_y
             add(string.format("l %s %s", fmt(w), fmt(br_y)))
@@ -864,7 +858,7 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
     end
 
     -- ========================================================================
-    -- LEFT HALF: bottom edge -> (top_start_x, 0)
+    -- LEFT HALF
     -- ========================================================================
     if is_sl then
         local top_y, bot_y, base_h = side_tail_span()
@@ -872,10 +866,8 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
         local x_top, a_top = left_boundary_at(top_y)
         local x_bot, a_bot = left_boundary_at(bot_y)
 
-        -- Bottom edge to Bottom-Left corner start
         add(string.format("l %s %s", fmt(r), fmt(h)))
 
-        -- Approach (x_bot, bot_y) going upward along Bottom-Left corner / Left edge / Top-Left corner
         if r >= 0.5 and bot_y > h - r then
             add_arc(r, h - r, r, HALF_PI, a_bot)
         elseif r >= 0.5 and bot_y < r then
@@ -887,7 +879,6 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
             add(string.format("l 0 %s", fmt(bot_y)))
         end
 
-        -- Seamless Left-side tail from (x_bot, bot_y) to (x_top, top_y)
         local x_tip = -s
         local dx_b  = x_bot - x_tip
         local dx_t  = x_top - x_tip
@@ -917,7 +908,6 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
             ))
         end
 
-        -- Finish from (x_top, top_y) to (r, 0)
         if r >= 0.5 and top_y > h - r then
             add_arc(r, h - r, r, a_top, math.pi)
             add(string.format("l 0 %s", fmt(r)))
@@ -929,10 +919,9 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
             add_arc(r, r, r, math.pi, 3 * HALF_PI)
         end
     else
-        -- 3. Bottom edge -> Bottom-Left corner (or Bottom-Left tail)
         if is_bl then
             local bl_x = math.min(w - r, ax)
-            local bl_y = math.max(r, h - ay)
+            local bl_y = h - ay
             local dy = h - bl_y
             add(string.format("l %s %s", fmt(bl_x), fmt(h)))
             if c < 0.01 then
@@ -964,9 +953,8 @@ local function build_box_drawing(w, h, radius, is_right, tail_enable, tail_size,
             add_arc(r, h - r, r, HALF_PI, math.pi)
         end
 
-        -- 4. Left edge -> Top-Left corner (or Top-Left tail)
         if is_tl then
-            local tl_y = math.min(h - r, ay)
+            local tl_y = ay
             add(string.format("l 0 %s", fmt(tl_y)))
             if c < 0.01 then
                 add(string.format("l %s 0 %s 0", fmt(-s), fmt(top_start_x)))
@@ -1006,8 +994,9 @@ end
 -- ============================================================================
 
 local function show_dialog(cfg)
-    local tail_pos_items = { "Top", "Near Top", "Middle", "Near Bottom", "Bottom" }
-    local tail_dir_items = { "Bottom to Top", "Top to Bottom" }
+    local tail_pos_items   = { "Top", "Near Top", "Middle", "Near Bottom", "Bottom" }
+    local tail_dir_items   = { "Bottom to Top", "Top to Bottom" }
+    local avatar_aln_items = { "Top", "Middle", "Bottom" }
 
     local dialog_config = {
         -- Colors & Layout
@@ -1021,65 +1010,77 @@ local function show_dialog(cfg)
         { class = "label", label = "Right Box Color:",  x = 2, y = 1, width = 1, height = 1 },
         { class = "color", name  = "right_box_color",   value = cfg.right_box_color,  x = 3, y = 1, width = 1, height = 1 },
 
-        { class = "label",     label = "Box Padding (px):",   x = 0, y = 2, width = 1, height = 1 },
+        { class = "label",     label = "Box Pad X (px):",     x = 0, y = 2, width = 1, height = 1 },
         { class = "floatedit", name  = "padding",             value = cfg.padding, min = 0, max = 200, x = 1, y = 2, width = 1, height = 1 },
-        { class = "label",     label = "Line Spacing (px):",  x = 2, y = 2, width = 1, height = 1 },
-        { class = "floatedit", name  = "spacing",             value = cfg.spacing, min = 0, max = 500, x = 3, y = 2, width = 1, height = 1 },
+        { class = "label",     label = "Box Pad Y (px):",     x = 2, y = 2, width = 1, height = 1 },
+        { class = "floatedit", name  = "padding_y",           value = cfg.padding_y, min = 0, max = 200, x = 3, y = 2, width = 1, height = 1 },
 
-        { class = "label",     label = "Clip Margin (px):",   x = 0, y = 3, width = 1, height = 1 },
-        { class = "floatedit", name  = "clip_margin",         value = cfg.clip_margin, min = 0, max = 500, x = 1, y = 3, width = 1, height = 1 },
-        { class = "label",     label = "Corner Radius (px):", x = 2, y = 3, width = 1, height = 1 },
-        { class = "intedit",   name  = "corner_radius",       value = cfg.corner_radius, min = 0, max = 100, x = 3, y = 3, width = 1, height = 1 },
+        { class = "label",     label = "Line Spacing (px):",  x = 0, y = 3, width = 1, height = 1 },
+        { class = "floatedit", name  = "spacing",             value = cfg.spacing, min = 0, max = 500, x = 1, y = 3, width = 1, height = 1 },
+        { class = "label",     label = "Clip Margin (px):",   x = 2, y = 3, width = 1, height = 1 },
+        { class = "floatedit", name  = "clip_margin",         value = cfg.clip_margin, min = 0, max = 500, x = 3, y = 3, width = 1, height = 1 },
+
+        { class = "label",     label = "Corner Radius (px):", x = 0, y = 4, width = 1, height = 1 },
+        { class = "intedit",   name  = "corner_radius",       value = cfg.corner_radius, min = 0, max = 100, x = 1, y = 4, width = 1, height = 1 },
 
         -- Line Breaks & Auto-Wrap
-        { class = "label",    label = "─── Line Breaks & Wrapping ───", x = 0, y = 4, width = 4, height = 1 },
-        { class = "checkbox", name  = "ignore_line_breaks", label = "Ignore line breaks", value = cfg.ignore_line_breaks, x = 0, y = 5, width = 2, height = 1 },
-        { class = "checkbox", name  = "auto_wrap_enable",   label = "Auto-wrap > Clip %", value = cfg.auto_wrap_enable,   x = 2, y = 5, width = 1, height = 1 },
-        { class = "intedit",  name  = "max_width_pct",      value = cfg.max_width_pct, min = 15, max = 100, x = 3, y = 5, width = 1, height = 1 },
+        { class = "label",    label = "─── Line Breaks & Wrapping ───", x = 0, y = 5, width = 4, height = 1 },
+        { class = "checkbox", name  = "ignore_line_breaks", label = "Ignore line breaks", value = cfg.ignore_line_breaks, x = 0, y = 6, width = 2, height = 1 },
+        { class = "checkbox", name  = "auto_wrap_enable",   label = "Auto-wrap > Clip %", value = cfg.auto_wrap_enable,   x = 2, y = 6, width = 1, height = 1 },
+        { class = "intedit",  name  = "max_width_pct",      value = cfg.max_width_pct, min = 15, max = 100, x = 3, y = 6, width = 1, height = 1 },
 
         -- Username (Actor Field)
-        { class = "label",    label = "─── Username (Actor Field) ───", x = 0, y = 6, width = 4, height = 1 },
-        { class = "label",    label = "Position:",        x = 0, y = 7, width = 1, height = 1 },
-        { class = "dropdown", name  = "username_mode",    items = { "Off", "Above", "Next to" }, value = cfg.username_mode, x = 1, y = 7, width = 1, height = 1 },
-        { class = "label",    label = "Username Color:",  x = 2, y = 7, width = 1, height = 1 },
-        { class = "color",    name  = "username_color",   value = cfg.username_color, x = 3, y = 7, width = 1, height = 1 },
-        { class = "label",    label = "Size (% of text):", x = 0, y = 8, width = 1, height = 1 },
-        { class = "intedit",  name  = "username_size_pct", value = cfg.username_size_pct, min = 10, max = 200, x = 1, y = 8, width = 1, height = 1 },
+        { class = "label",    label = "─── Username (Actor Field) ───", x = 0, y = 7, width = 4, height = 1 },
+        { class = "label",    label = "Position:",        x = 0, y = 8, width = 1, height = 1 },
+        { class = "dropdown", name  = "username_mode",    items = { "Off", "Above", "Next to" }, value = cfg.username_mode, x = 1, y = 8, width = 1, height = 1 },
+        { class = "label",    label = "Username Color:",  x = 2, y = 8, width = 1, height = 1 },
+        { class = "color",    name  = "username_color",   value = cfg.username_color, x = 3, y = 8, width = 1, height = 1 },
+        { class = "label",    label = "Size (% of text):", x = 0, y = 9, width = 1, height = 1 },
+        { class = "intedit",  name  = "username_size_pct", value = cfg.username_size_pct, min = 10, max = 200, x = 1, y = 9, width = 1, height = 1 },
 
         -- Read Indicator & Avatar
-        { class = "label",     label = "─── Read & Avatar (Effect: Read / Avatar) ───", x = 0, y = 9, width = 4, height = 1 },
-        { class = "label",     label = "Read Color:",       x = 0, y = 10, width = 1, height = 1 },
-        { class = "color",     name  = "read_color",        value = cfg.read_color, x = 1, y = 10, width = 1, height = 1 },
-        { class = "label",     label = "Read Size (%):",    x = 2, y = 10, width = 1, height = 1 },
-        { class = "intedit",   name  = "read_size_pct",     value = cfg.read_size_pct, min = 10, max = 300, x = 3, y = 10, width = 1, height = 1 },
+        { class = "label",     label = "─── Read & Avatar (Effect: Read / Avatar) ───", x = 0, y = 10, width = 4, height = 1 },
+        { class = "label",     label = "Read Color:",       x = 0, y = 11, width = 1, height = 1 },
+        { class = "color",     name  = "read_color",        value = cfg.read_color, x = 1, y = 11, width = 1, height = 1 },
+        { class = "label",     label = "Read Size (%):",    x = 2, y = 11, width = 1, height = 1 },
+        { class = "intedit",   name  = "read_size_pct",     value = cfg.read_size_pct, min = 10, max = 300, x = 3, y = 11, width = 1, height = 1 },
 
-        { class = "label",     label = "Avatar Size (px):", x = 0, y = 11, width = 1, height = 1 },
-        { class = "floatedit", name  = "avatar_size",       value = cfg.avatar_size, min = 8, max = 300, x = 1, y = 11, width = 1, height = 1 },
-        { class = "label",     label = "Avatar Gap (px):",  x = 2, y = 11, width = 1, height = 1 },
-        { class = "floatedit", name  = "avatar_gap",        value = cfg.avatar_gap, min = 0, max = 200, x = 3, y = 11, width = 1, height = 1 },
+        { class = "label",     label = "Avatar Size (px):", x = 0, y = 12, width = 1, height = 1 },
+        { class = "floatedit", name  = "avatar_size",       value = cfg.avatar_size, min = 8, max = 300, x = 1, y = 12, width = 1, height = 1 },
+        { class = "label",     label = "Avatar Gap (px):",  x = 2, y = 12, width = 1, height = 1 },
+        { class = "floatedit", name  = "avatar_gap",        value = cfg.avatar_gap, min = 0, max = 200, x = 3, y = 12, width = 1, height = 1 },
+
+        { class = "label",     label = "Avatar Align:",     x = 0, y = 13, width = 1, height = 1 },
+        { class = "dropdown",  name  = "avatar_align",      items = avatar_aln_items, value = cfg.avatar_align, x = 1, y = 13, width = 1, height = 1 },
 
         -- Balloon Tails
-        { class = "label",     label = "─── Balloon Tails ───", x = 0, y = 12, width = 4, height = 1 },
+        { class = "label",     label = "─── Balloon Tails ───", x = 0, y = 14, width = 4, height = 1 },
 
-        { class = "checkbox",  name  = "left_arrow_enable",  label = "Left Tail",         value = cfg.left_arrow_enable, x = 0, y = 13, width = 1, height = 1 },
-        { class = "dropdown",  name  = "left_arrow_pos",     items = tail_pos_items,      value = cfg.left_arrow_pos, x = 1, y = 13, width = 1, height = 1 },
-        { class = "label",     label = "Left Tail Size (px):", x = 2, y = 13, width = 1, height = 1 },
-        { class = "floatedit", name  = "left_arrow_size",    value = cfg.left_arrow_size, min = 1, max = 100, x = 3, y = 13, width = 1, height = 1 },
+        { class = "checkbox",  name  = "left_arrow_enable",  label = "Left Tail",          value = cfg.left_arrow_enable, x = 0, y = 15, width = 1, height = 1 },
+        { class = "dropdown",  name  = "left_arrow_pos",     items = tail_pos_items,       value = cfg.left_arrow_pos, x = 1, y = 15, width = 1, height = 1 },
+        { class = "label",     label = "Left Curve (%):",    x = 2, y = 15, width = 1, height = 1 },
+        { class = "intedit",   name  = "left_arrow_curve",   value = cfg.left_arrow_curve, min = 0, max = 100, x = 3, y = 15, width = 1, height = 1 },
 
-        { class = "label",     label = "Left Curve (%):",    x = 0, y = 14, width = 1, height = 1 },
-        { class = "intedit",   name  = "left_arrow_curve",   value = cfg.left_arrow_curve, min = 0, max = 100, x = 1, y = 14, width = 1, height = 1 },
-        { class = "label",     label = "Left Curve Dir:",    x = 2, y = 14, width = 1, height = 1 },
-        { class = "dropdown",  name  = "left_arrow_dir",     items = tail_dir_items,      value = cfg.left_arrow_dir, x = 3, y = 14, width = 1, height = 1 },
+        { class = "label",     label = "Left Width (px):",   x = 0, y = 16, width = 1, height = 1 },
+        { class = "floatedit", name  = "left_arrow_size",    value = cfg.left_arrow_size,  min = 1, max = 200, x = 1, y = 16, width = 1, height = 1 },
+        { class = "label",     label = "Left Height (px):",  x = 2, y = 16, width = 1, height = 1 },
+        { class = "floatedit", name  = "left_arrow_height",  value = cfg.left_arrow_height, min = 1, max = 200, x = 3, y = 16, width = 1, height = 1 },
 
-        { class = "checkbox",  name  = "right_arrow_enable", label = "Right Tail",         value = cfg.right_arrow_enable, x = 0, y = 15, width = 1, height = 1 },
-        { class = "dropdown",  name  = "right_arrow_pos",    items = tail_pos_items,       value = cfg.right_arrow_pos, x = 1, y = 15, width = 1, height = 1 },
-        { class = "label",     label = "Right Tail Size (px):", x = 2, y = 15, width = 1, height = 1 },
-        { class = "floatedit", name  = "right_arrow_size",   value = cfg.right_arrow_size, min = 1, max = 100, x = 3, y = 15, width = 1, height = 1 },
+        { class = "label",     label = "Left Curve Dir:",    x = 0, y = 17, width = 1, height = 1 },
+        { class = "dropdown",  name  = "left_arrow_dir",     items = tail_dir_items,       value = cfg.left_arrow_dir, x = 1, y = 17, width = 3, height = 1 },
 
-        { class = "label",     label = "Right Curve (%):",   x = 0, y = 16, width = 1, height = 1 },
-        { class = "intedit",   name  = "right_arrow_curve",  value = cfg.right_arrow_curve, min = 0, max = 100, x = 1, y = 16, width = 1, height = 1 },
-        { class = "label",     label = "Right Curve Dir:",   x = 2, y = 16, width = 1, height = 1 },
-        { class = "dropdown",  name  = "right_arrow_dir",    items = tail_dir_items,       value = cfg.right_arrow_dir, x = 3, y = 16, width = 1, height = 1 }
+        { class = "checkbox",  name  = "right_arrow_enable", label = "Right Tail",         value = cfg.right_arrow_enable, x = 0, y = 18, width = 1, height = 1 },
+        { class = "dropdown",  name  = "right_arrow_pos",    items = tail_pos_items,       value = cfg.right_arrow_pos, x = 1, y = 18, width = 1, height = 1 },
+        { class = "label",     label = "Right Curve (%):",   x = 2, y = 18, width = 1, height = 1 },
+        { class = "intedit",   name  = "right_arrow_curve",  value = cfg.right_arrow_curve, min = 0, max = 100, x = 3, y = 18, width = 1, height = 1 },
+
+        { class = "label",     label = "Right Width (px):",  x = 0, y = 19, width = 1, height = 1 },
+        { class = "floatedit", name  = "right_arrow_size",   value = cfg.right_arrow_size,  min = 1, max = 200, x = 1, y = 19, width = 1, height = 1 },
+        { class = "label",     label = "Right Height (px):", x = 2, y = 19, width = 1, height = 1 },
+        { class = "floatedit", name  = "right_arrow_height", value = cfg.right_arrow_height, min = 1, max = 200, x = 3, y = 19, width = 1, height = 1 },
+
+        { class = "label",     label = "Right Curve Dir:",   x = 0, y = 20, width = 1, height = 1 },
+        { class = "dropdown",  name  = "right_arrow_dir",    items = tail_dir_items,       value = cfg.right_arrow_dir, x = 1, y = 20, width = 3, height = 1 }
     }
 
     local btn, res = aegisub.dialog.display(dialog_config, { "Apply", "Cancel" })
@@ -1183,7 +1184,8 @@ local function run_phone_sign(sub, sel)
     end
     save_config(res)
 
-    local pad           = res.padding
+    local pad_x         = res.padding
+    local pad_y         = res.padding_y
     local spacing       = res.spacing
     local clip_margin   = res.clip_margin
     local corner_radius = res.corner_radius
@@ -1288,11 +1290,12 @@ local function run_phone_sign(sub, sel)
             local has_avatar = eff_info.has_avatar
 
             local tail_enable = is_right and res.right_arrow_enable or res.left_arrow_enable
-            local tail_size   = is_right and res.right_arrow_size   or res.left_arrow_size
+            local tail_w      = is_right and res.right_arrow_size   or res.left_arrow_size
+            local tail_h      = is_right and res.right_arrow_height or res.left_arrow_height
             local tail_pos    = is_right and res.right_arrow_pos    or res.left_arrow_pos
             local tail_curve  = is_right and res.right_arrow_curve  or res.left_arrow_curve
             local tail_dir    = is_right and res.right_arrow_dir    or res.left_arrow_dir
-            local tail_offset = (tail_enable and tail_size > 0) and tail_size or 0
+            local tail_offset = (tail_enable and tail_w > 0 and tail_h > 0) and tail_w or 0
 
             local actor_name = trim(orig.actor)
             local use_uname  = (actor_name ~= "" and res.username_mode ~= "Off")
@@ -1320,7 +1323,7 @@ local function run_phone_sign(sub, sel)
             local max_text_w = nil
             if res.auto_wrap_enable then
                 local max_box_w = est_clip_w * (res.max_width_pct / 100.0)
-                max_text_w = math.max(10, max_box_w - (2 * pad))
+                max_text_w = math.max(10, max_box_w - (2 * pad_x))
             end
 
             local formatted_text, block_w, block_h = format_and_measure_text(
@@ -1329,36 +1332,119 @@ local function run_phone_sign(sub, sel)
                 res.ignore_line_breaks,
                 max_text_w
             )
-            local box_w = block_w + (2 * pad)
-            local box_h = block_h + (2 * pad)
+            local box_w = block_w + (2 * pad_x)
+            local box_h = block_h + (2 * pad_y)
 
             -- Determine vertical coordinates for bubble, username, and avatar
             local box_y, uname_y, avatar_y
             if idx == 1 and base.py then
                 local text_top = anchor_y_to_top(base.py, base.an, block_h)
-                box_y = text_top - pad
+                box_y = text_top - pad_y
                 if use_uname and res.username_mode == "Above" then
-                    uname_y  = box_y - UNAME_V_GAP - uname_h
-                    avatar_y = uname_y
-                else
-                    avatar_y = box_y
+                    uname_y = box_y - UNAME_V_GAP - uname_h
+                end
+                if avatar_group then
+                    if res.avatar_align == "Middle" then
+                        avatar_y = box_y + (box_h - av_h) / 2
+                    elseif res.avatar_align == "Bottom" then
+                        avatar_y = box_y + box_h - av_h
+                    else
+                        avatar_y = box_y
+                    end
                 end
             else
-                avatar_y = current_y
                 if use_uname and res.username_mode == "Above" then
                     uname_y = current_y
                     box_y   = uname_y + uname_h + UNAME_V_GAP
                 else
                     box_y = current_y
                 end
+                if avatar_group then
+                    if res.avatar_align == "Middle" then
+                        avatar_y = box_y + (box_h - av_h) / 2
+                    elseif res.avatar_align == "Bottom" then
+                        avatar_y = box_y + box_h - av_h
+                    else
+                        avatar_y = box_y
+                    end
+                    -- Shift the row downward if a tall avatar would overlap the previous row
+                    if avatar_y < current_y then
+                        local shift = current_y - avatar_y
+                        avatar_y = avatar_y + shift
+                        box_y    = box_y + shift
+                        if uname_y then
+                            uname_y = uname_y + shift
+                        end
+                    end
+                end
             end
 
-            local av_left_edge  = edge_x_at_y(tl, bl, avatar_y) + clip_margin
-            local av_right_edge = edge_x_at_y(tr, br, avatar_y) - clip_margin
+            local raw_left   = edge_x_at_y(tl, bl, box_y)
+            local raw_right  = edge_x_at_y(tr, br, box_y)
+            local left_edge  = raw_left + clip_margin
+            local right_edge = raw_right - clip_margin
+
+            local av_x    = nil
+            local uname_x = nil
+            local box_x   = nil
+
+            if avatar_group and use_uname and res.username_mode == "Next to" then
+                -- Avatar + Username stacked vertically in an outer column, bubble shifted inward
+                local col_w    = math.max(av_w, uname_w)
+                local av_raw_l = edge_x_at_y(tl, bl, avatar_y) + clip_margin
+                local av_raw_r = edge_x_at_y(tr, br, avatar_y) - clip_margin
+
+                uname_y = avatar_y + av_h + UNAME_V_GAP
+                local u_raw_l = edge_x_at_y(tl, bl, uname_y) + clip_margin
+                local u_raw_r = edge_x_at_y(tr, br, uname_y) - clip_margin
+
+                if is_right then
+                    av_x    = av_raw_r - col_w + (col_w - av_w) / 2
+                    uname_x = u_raw_r  - col_w + (col_w - uname_w) / 2
+                    box_x   = math.max(left_edge, right_edge - col_w - avatar_gap - tail_offset - box_w)
+                else
+                    av_x    = av_raw_l + (col_w - av_w) / 2
+                    uname_x = u_raw_l  + (col_w - uname_w) / 2
+                    box_x   = left_edge + col_w + avatar_gap + tail_offset
+                end
+            else
+                -- Standard Avatar horizontal position (if present)
+                if avatar_group then
+                    local av_left_edge  = edge_x_at_y(tl, bl, avatar_y) + clip_margin
+                    local av_right_edge = edge_x_at_y(tr, br, avatar_y) - clip_margin
+                    av_x = is_right and (av_right_edge - av_w) or av_left_edge
+                end
+
+                if use_uname and res.username_mode == "Above" then
+                    local u_left  = edge_x_at_y(tl, bl, uname_y) + clip_margin + av_shift + tail_offset
+                    local u_right = edge_x_at_y(tr, br, uname_y) - clip_margin - av_shift - tail_offset
+                    uname_x = is_right and (u_right - uname_w) or u_left
+                    if is_right then
+                        box_x = math.max(left_edge, right_edge - av_shift - tail_offset - box_w)
+                    else
+                        box_x = left_edge + av_shift + tail_offset
+                    end
+                elseif use_uname and res.username_mode == "Next to" then
+                    -- No avatar on this line: username sits next to the bubble
+                    uname_y = box_y
+                    if is_right then
+                        uname_x = right_edge - uname_w
+                        box_x   = math.max(left_edge, uname_x - UNAME_H_GAP - tail_offset - box_w)
+                    else
+                        uname_x = left_edge
+                        box_x   = uname_x + uname_w + UNAME_H_GAP + tail_offset
+                    end
+                else
+                    if is_right then
+                        box_x = math.max(left_edge, right_edge - av_shift - tail_offset - box_w)
+                    else
+                        box_x = left_edge + av_shift + tail_offset
+                    end
+                end
+            end
 
             -- 1) Generate multi-line avatar (if present)
-            if avatar_group then
-                local av_x = is_right and (av_right_edge - av_w) or av_left_edge
+            if avatar_group and av_x and avatar_y then
                 local av_fsc = fmt(av_scale * 100.0)
                 for _, part in ipairs(avatar_group.parts) do
                     local av_line = copy_table(orig)
@@ -1373,14 +1459,9 @@ local function run_phone_sign(sub, sel)
                 end
             end
 
-            local uname_line = nil
-
-            if use_uname and res.username_mode == "Above" then
-                local u_left  = edge_x_at_y(tl, bl, uname_y) + clip_margin + av_shift + tail_offset
-                local u_right = edge_x_at_y(tr, br, uname_y) - clip_margin - av_shift - tail_offset
-                local uname_x = is_right and (u_right - uname_w) or u_left
-
-                uname_line = copy_table(orig)
+            -- 2) Username line (if present)
+            if use_uname and uname_x and uname_y then
+                local uname_line = copy_table(orig)
                 uname_line.layer = orig.layer + 1
                 uname_line.text = string.format(
                     [=[{\an7\pos(%s,%s)%s%s%s\1c%s}%s]=],
@@ -1388,48 +1469,11 @@ local function run_phone_sign(sub, sel)
                     persp_tags, uname_scale_tags, font_tags,
                     uname_ass, uname_norm
                 )
-            end
-
-            local raw_left   = edge_x_at_y(tl, bl, box_y)
-            local raw_right  = edge_x_at_y(tr, br, box_y)
-            local left_edge  = raw_left + clip_margin
-            local right_edge = raw_right - clip_margin
-
-            local box_x
-            if use_uname and res.username_mode == "Next to" then
-                local u_y = box_y
-                local uname_x
-                if is_right then
-                    uname_x = right_edge - av_shift - uname_w
-                    box_x = math.max(left_edge, uname_x - UNAME_H_GAP - tail_offset - box_w)
-                else
-                    uname_x = left_edge + av_shift
-                    box_x = uname_x + uname_w + UNAME_H_GAP + tail_offset
-                end
-
-                uname_line = copy_table(orig)
-                uname_line.layer = orig.layer + 1
-                uname_line.text = string.format(
-                    [=[{\an7\pos(%s,%s)%s%s%s\1c%s}%s]=],
-                    fmt(uname_x), fmt(u_y),
-                    persp_tags, uname_scale_tags, font_tags,
-                    uname_ass, uname_norm
-                )
-            else
-                if is_right then
-                    box_x = math.max(left_edge, right_edge - av_shift - tail_offset - box_w)
-                else
-                    box_x = left_edge + av_shift + tail_offset
-                end
-            end
-
-            local text_y = box_y + pad
-            local text_x = box_x + pad + (base.fax * pad)
-
-            -- 2) Username line (if present)
-            if uname_line then
                 table.insert(generated_lines, uname_line)
             end
+
+            local text_y = box_y + pad_y
+            local text_x = box_x + pad_x + (base.fax * pad_y)
 
             -- 3) Seamless bubble + customizable balloon tail (\p1) on orig.layer
             local box_line = copy_table(orig)
@@ -1440,7 +1484,7 @@ local function run_phone_sign(sub, sel)
                 fmt(box_y),
                 persp_tags,
                 box_color,
-                build_box_drawing(box_w, box_h, corner_radius, is_right, tail_enable, tail_size, tail_pos, tail_curve, tail_dir)
+                build_box_drawing(box_w, box_h, corner_radius, is_right, tail_enable, tail_w, tail_h, tail_pos, tail_curve, tail_dir)
             )
             table.insert(generated_lines, box_line)
 
@@ -1492,10 +1536,10 @@ local function run_phone_sign(sub, sel)
 
             -- Advance vertical cursor below the tallest element (bubble, username, or avatar)
             local row_bottom = box_y + box_h
-            if use_uname and res.username_mode == "Next to" then
-                row_bottom = math.max(row_bottom, box_y + uname_h)
+            if use_uname and uname_y then
+                row_bottom = math.max(row_bottom, uname_y + uname_h)
             end
-            if avatar_group then
+            if avatar_group and avatar_y then
                 row_bottom = math.max(row_bottom, avatar_y + av_h)
             end
             current_y = row_bottom + spacing
