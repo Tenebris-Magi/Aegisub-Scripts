@@ -17,8 +17,8 @@
       "description": "Automates positioned phone chat signs with perspective-matched bubbles, customizable seamless balloon tails, usernames, read indicators, multi-line avatars, attachment skipping with optional Read, separate-layer borders, blur, and auto-wrapping.",
       "channels": {
         "release": {
-          "version": "0.7.0",
-          "released": "2026-11-21",
+          "version": "0.7.2",
+          "released": "2026-11-23",
           "default": true,
           "files": [
             {
