@@ -24,7 +24,7 @@
             {
               "name": ".lua",
               "url": "@{fileBaseUrl}/macros/@{namespace}@{name}",
-              "sha1": "425302387c1a0c636f86b83007d615d38fa6240f"
+              "sha1": "e9a3604adb96c7c5c58583ea9d13e1beba24bab6"
             }
           ],
           "requiredModules": []
