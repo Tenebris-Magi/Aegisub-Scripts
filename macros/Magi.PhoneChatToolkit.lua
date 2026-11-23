@@ -1,7 +1,7 @@
 script_name = "Phone Chat Toolkit"
 script_description = "Automates positioned phone chat signs with perspective-matched bubbles, customizable seamless balloon tails, usernames, read indicators, multi-line avatars, attachment skipping with optional Read, separate-layer borders, blur, and auto-wrapping."
 script_author = "Magi"
-script_version = "0.7.0"
+script_version = "0.7.2"
 script_namespace = "Magi.PhoneChatToolkit"
 
 local haveDepCtrl, DependencyControl, depRec = pcall(require, "l0.DependencyControl")
@@ -26,8 +26,9 @@ local DEFAULT_CONFIG = {
     right_box_color    = "#007AFF",
     padding            = 12,
     padding_y          = 12,
+    left_clip_margin   = 10,
+    right_clip_margin  = 10,
     spacing            = 14,
-    clip_margin        = 10,
     corner_radius      = 0,
     blur               = 0,
 
@@ -86,20 +87,37 @@ local function load_config()
         return cfg
     end
 
+    local legacy_margin = nil
+    local has_left_margin  = false
+    local has_right_margin = false
+
     for line in f:lines() do
         local key, val = line:match("^([^=]+)=(.*)$")
-        if key and val and DEFAULT_CONFIG[key] ~= nil then
-            local def_type = type(DEFAULT_CONFIG[key])
-            if def_type == "number" then
-                cfg[key] = tonumber(val) or DEFAULT_CONFIG[key]
-            elseif def_type == "boolean" then
-                cfg[key] = (val == "true")
-            else
-                cfg[key] = val
+        if key and val then
+            if key == "clip_margin" then
+                legacy_margin = tonumber(val)
+            elseif DEFAULT_CONFIG[key] ~= nil then
+                local def_type = type(DEFAULT_CONFIG[key])
+                if def_type == "number" then
+                    cfg[key] = tonumber(val) or DEFAULT_CONFIG[key]
+                elseif def_type == "boolean" then
+                    cfg[key] = (val == "true")
+                else
+                    cfg[key] = val
+                end
+                if key == "left_clip_margin"  then has_left_margin  = true end
+                if key == "right_clip_margin" then has_right_margin = true end
             end
         end
     end
     f:close()
+
+    -- Carry over legacy single clip_margin if upgrading from v2.7.0 or earlier
+    if legacy_margin then
+        if not has_left_margin  then cfg.left_clip_margin  = legacy_margin end
+        if not has_right_margin then cfg.right_clip_margin = legacy_margin end
+    end
+
     return cfg
 end
 
@@ -214,7 +232,6 @@ local function extract_any_clip_points(text)
         return nil
     end
 
-    -- Check for vectorial clip first (contains 'm' or 'M')
     if clip_content:find("[mM]") then
         local scale = 1
         local scale_str, rest = clip_content:match("^%s*(%d+)%s*,%s*(.+)$")
@@ -246,7 +263,6 @@ local function extract_any_clip_points(text)
         return nil
     end
 
-    -- Otherwise parse rectangular clip: \clip(x1, y1, x2, y2)
     local nums = {}
     for num in clip_content:gmatch("[%-]?%d+%.?%d*") do
         table.insert(nums, tonumber(num))
@@ -329,11 +345,6 @@ local function anchor_y_to_top(py, an, block_h)
     return py
 end
 
--- Effect parser:
---   - "Read"       -> Read template line
---   - "Avatar"     -> Avatar drawing template line (matched to messages via Actor field)
---   - "Attachment" (+ optional "Read", "Left", "Right") -> Attachment skip zone (never generates a balloon)
---   - "Left", "Right", "Left Read", "Right Read" (any order) -> Message lines
 local function parse_effect(eff_raw)
     local eff = trim(eff_raw):lower()
     local has_left, has_right, has_read, has_avatar, has_attachment = false, false, false, false, false
@@ -1106,86 +1117,89 @@ local function show_dialog(cfg)
         { class = "label",     label = "Box Pad Y (px):",     x = 2, y = 2, width = 1, height = 1 },
         { class = "floatedit", name  = "padding_y",           value = cfg.padding_y, min = 0, max = 200, x = 3, y = 2, width = 1, height = 1 },
 
-        { class = "label",     label = "Line Spacing (px):",  x = 0, y = 3, width = 1, height = 1 },
-        { class = "floatedit", name  = "spacing",             value = cfg.spacing, min = 0, max = 500, x = 1, y = 3, width = 1, height = 1 },
-        { class = "label",     label = "Clip Margin (px):",   x = 2, y = 3, width = 1, height = 1 },
-        { class = "floatedit", name  = "clip_margin",         value = cfg.clip_margin, min = 0, max = 500, x = 3, y = 3, width = 1, height = 1 },
+        { class = "label",     label = "Left Margin (px):",   x = 0, y = 3, width = 1, height = 1 },
+        { class = "floatedit", name  = "left_clip_margin",    value = cfg.left_clip_margin, min = 0, max = 500, x = 1, y = 3, width = 1, height = 1 },
+        { class = "label",     label = "Right Margin (px):",  x = 2, y = 3, width = 1, height = 1 },
+        { class = "floatedit", name  = "right_clip_margin",   value = cfg.right_clip_margin, min = 0, max = 500, x = 3, y = 3, width = 1, height = 1 },
 
-        { class = "label",     label = "Corner Radius (px):", x = 0, y = 4, width = 1, height = 1 },
-        { class = "intedit",   name  = "corner_radius",       value = cfg.corner_radius, min = 0, max = 100, x = 1, y = 4, width = 1, height = 1 },
-        { class = "label",     label = "Blur (All):",         x = 2, y = 4, width = 1, height = 1 },
-        { class = "floatedit", name  = "blur",                value = cfg.blur, min = 0, max = 50, x = 3, y = 4, width = 1, height = 1 },
+        { class = "label",     label = "Line Spacing (px):",  x = 0, y = 4, width = 1, height = 1 },
+        { class = "floatedit", name  = "spacing",             value = cfg.spacing, min = 0, max = 500, x = 1, y = 4, width = 1, height = 1 },
+        { class = "label",     label = "Corner Radius (px):", x = 2, y = 4, width = 1, height = 1 },
+        { class = "intedit",   name  = "corner_radius",       value = cfg.corner_radius, min = 0, max = 100, x = 3, y = 4, width = 1, height = 1 },
+
+        { class = "label",     label = "Blur (All):",         x = 0, y = 5, width = 1, height = 1 },
+        { class = "floatedit", name  = "blur",                value = cfg.blur, min = 0, max = 50, x = 1, y = 5, width = 1, height = 1 },
 
         -- Separate-Layer Borders
-        { class = "label",     label = "─── Borders (Separate Layer) ───", x = 0, y = 5, width = 4, height = 1 },
-        { class = "checkbox",  name  = "text_bord_enable", label = "Text Border (px):", value = cfg.text_bord_enable, x = 0, y = 6, width = 1, height = 1 },
-        { class = "floatedit", name  = "text_bord_size",   value = cfg.text_bord_size, min = 0, max = 50, x = 1, y = 6, width = 1, height = 1 },
-        { class = "label",     label = "Text Bord Color:", x = 2, y = 6, width = 1, height = 1 },
-        { class = "color",     name  = "text_bord_color",  value = cfg.text_bord_color, x = 3, y = 6, width = 1, height = 1 },
+        { class = "label",     label = "─── Borders (Separate Layer) ───", x = 0, y = 6, width = 4, height = 1 },
+        { class = "checkbox",  name  = "text_bord_enable", label = "Text Border (px):", value = cfg.text_bord_enable, x = 0, y = 7, width = 1, height = 1 },
+        { class = "floatedit", name  = "text_bord_size",   value = cfg.text_bord_size, min = 0, max = 50, x = 1, y = 7, width = 1, height = 1 },
+        { class = "label",     label = "Text Bord Color:", x = 2, y = 7, width = 1, height = 1 },
+        { class = "color",     name  = "text_bord_color",  value = cfg.text_bord_color, x = 3, y = 7, width = 1, height = 1 },
 
-        { class = "checkbox",  name  = "user_bord_enable", label = "User Border (px):", value = cfg.user_bord_enable, x = 0, y = 7, width = 1, height = 1 },
-        { class = "floatedit", name  = "user_bord_size",   value = cfg.user_bord_size, min = 0, max = 50, x = 1, y = 7, width = 1, height = 1 },
-        { class = "label",     label = "User Bord Color:", x = 2, y = 7, width = 1, height = 1 },
-        { class = "color",     name  = "user_bord_color",  value = cfg.user_bord_color, x = 3, y = 7, width = 1, height = 1 },
+        { class = "checkbox",  name  = "user_bord_enable", label = "User Border (px):", value = cfg.user_bord_enable, x = 0, y = 8, width = 1, height = 1 },
+        { class = "floatedit", name  = "user_bord_size",   value = cfg.user_bord_size, min = 0, max = 50, x = 1, y = 8, width = 1, height = 1 },
+        { class = "label",     label = "User Bord Color:", x = 2, y = 8, width = 1, height = 1 },
+        { class = "color",     name  = "user_bord_color",  value = cfg.user_bord_color, x = 3, y = 8, width = 1, height = 1 },
 
         -- Line Breaks & Auto-Wrap
-        { class = "label",    label = "─── Line Breaks & Wrapping ───", x = 0, y = 8, width = 4, height = 1 },
-        { class = "checkbox", name  = "ignore_line_breaks", label = "Ignore line breaks", value = cfg.ignore_line_breaks, x = 0, y = 9, width = 2, height = 1 },
-        { class = "checkbox", name  = "auto_wrap_enable",   label = "Auto-wrap > Clip %", value = cfg.auto_wrap_enable,   x = 2, y = 9, width = 1, height = 1 },
-        { class = "intedit",  name  = "max_width_pct",      value = cfg.max_width_pct, min = 15, max = 100, x = 3, y = 9, width = 1, height = 1 },
+        { class = "label",    label = "─── Line Breaks & Wrapping ───", x = 0, y = 9, width = 4, height = 1 },
+        { class = "checkbox", name  = "ignore_line_breaks", label = "Ignore line breaks", value = cfg.ignore_line_breaks, x = 0, y = 10, width = 2, height = 1 },
+        { class = "checkbox", name  = "auto_wrap_enable",   label = "Auto-wrap > Clip %", value = cfg.auto_wrap_enable,   x = 2, y = 10, width = 1, height = 1 },
+        { class = "intedit",  name  = "max_width_pct",      value = cfg.max_width_pct, min = 15, max = 100, x = 3, y = 10, width = 1, height = 1 },
 
         -- Username (Actor Field)
-        { class = "label",    label = "─── Username (Actor Field) ───", x = 0, y = 10, width = 4, height = 1 },
-        { class = "label",    label = "Position:",        x = 0, y = 11, width = 1, height = 1 },
-        { class = "dropdown", name  = "username_mode",    items = { "Off", "Above", "Next to" }, value = cfg.username_mode, x = 1, y = 11, width = 1, height = 1 },
-        { class = "label",    label = "Username Color:",  x = 2, y = 11, width = 1, height = 1 },
-        { class = "color",    name  = "username_color",   value = cfg.username_color, x = 3, y = 11, width = 1, height = 1 },
-        { class = "label",    label = "Size (% of text):", x = 0, y = 12, width = 1, height = 1 },
-        { class = "intedit",  name  = "username_size_pct", value = cfg.username_size_pct, min = 10, max = 200, x = 1, y = 12, width = 1, height = 1 },
+        { class = "label",    label = "─── Username (Actor Field) ───", x = 0, y = 11, width = 4, height = 1 },
+        { class = "label",    label = "Position:",        x = 0, y = 12, width = 1, height = 1 },
+        { class = "dropdown", name  = "username_mode",    items = { "Off", "Above", "Next to" }, value = cfg.username_mode, x = 1, y = 12, width = 1, height = 1 },
+        { class = "label",    label = "Username Color:",  x = 2, y = 12, width = 1, height = 1 },
+        { class = "color",    name  = "username_color",   value = cfg.username_color, x = 3, y = 12, width = 1, height = 1 },
+        { class = "label",    label = "Size (% of text):", x = 0, y = 13, width = 1, height = 1 },
+        { class = "intedit",  name  = "username_size_pct", value = cfg.username_size_pct, min = 10, max = 200, x = 1, y = 13, width = 1, height = 1 },
 
         -- Read Indicator & Avatar
-        { class = "label",     label = "─── Read & Avatar (Avatar matched via Actor) ───", x = 0, y = 13, width = 4, height = 1 },
-        { class = "label",     label = "Read Color:",       x = 0, y = 14, width = 1, height = 1 },
-        { class = "color",     name  = "read_color",        value = cfg.read_color, x = 1, y = 14, width = 1, height = 1 },
-        { class = "label",     label = "Read Size (%):",    x = 2, y = 14, width = 1, height = 1 },
-        { class = "intedit",   name  = "read_size_pct",     value = cfg.read_size_pct, min = 10, max = 300, x = 3, y = 14, width = 1, height = 1 },
+        { class = "label",     label = "─── Read & Avatar (Avatar matched via Actor) ───", x = 0, y = 14, width = 4, height = 1 },
+        { class = "label",     label = "Read Color:",       x = 0, y = 15, width = 1, height = 1 },
+        { class = "color",     name  = "read_color",        value = cfg.read_color, x = 1, y = 15, width = 1, height = 1 },
+        { class = "label",     label = "Read Size (%):",    x = 2, y = 15, width = 1, height = 1 },
+        { class = "intedit",   name  = "read_size_pct",     value = cfg.read_size_pct, min = 10, max = 300, x = 3, y = 15, width = 1, height = 1 },
 
-        { class = "label",     label = "Avatar Size (px):", x = 0, y = 15, width = 1, height = 1 },
-        { class = "floatedit", name  = "avatar_size",       value = cfg.avatar_size, min = 8, max = 300, x = 1, y = 15, width = 1, height = 1 },
-        { class = "label",     label = "Avatar Gap (px):",  x = 2, y = 15, width = 1, height = 1 },
-        { class = "floatedit", name  = "avatar_gap",        value = cfg.avatar_gap, min = 0, max = 200, x = 3, y = 15, width = 1, height = 1 },
+        { class = "label",     label = "Avatar Size (px):", x = 0, y = 16, width = 1, height = 1 },
+        { class = "floatedit", name  = "avatar_size",       value = cfg.avatar_size, min = 8, max = 300, x = 1, y = 16, width = 1, height = 1 },
+        { class = "label",     label = "Avatar Gap (px):",  x = 2, y = 16, width = 1, height = 1 },
+        { class = "floatedit", name  = "avatar_gap",        value = cfg.avatar_gap, min = 0, max = 200, x = 3, y = 16, width = 1, height = 1 },
 
-        { class = "label",     label = "Avatar Align:",     x = 0, y = 16, width = 1, height = 1 },
-        { class = "dropdown",  name  = "avatar_align",      items = avatar_aln_items, value = cfg.avatar_align, x = 1, y = 16, width = 1, height = 1 },
+        { class = "label",     label = "Avatar Align:",     x = 0, y = 17, width = 1, height = 1 },
+        { class = "dropdown",  name  = "avatar_align",      items = avatar_aln_items, value = cfg.avatar_align, x = 1, y = 17, width = 1, height = 1 },
 
         -- Balloon Tails
-        { class = "label",     label = "─── Balloon Tails ───", x = 0, y = 17, width = 4, height = 1 },
+        { class = "label",     label = "─── Balloon Tails ───", x = 0, y = 18, width = 4, height = 1 },
 
-        { class = "checkbox",  name  = "left_arrow_enable",  label = "Left Tail",          value = cfg.left_arrow_enable, x = 0, y = 18, width = 1, height = 1 },
-        { class = "dropdown",  name  = "left_arrow_pos",     items = tail_pos_items,       value = cfg.left_arrow_pos, x = 1, y = 18, width = 1, height = 1 },
-        { class = "label",     label = "Left Curve (%):",    x = 2, y = 18, width = 1, height = 1 },
-        { class = "intedit",   name  = "left_arrow_curve",   value = cfg.left_arrow_curve, min = 0, max = 100, x = 3, y = 18, width = 1, height = 1 },
+        { class = "checkbox",  name  = "left_arrow_enable",  label = "Left Tail",          value = cfg.left_arrow_enable, x = 0, y = 19, width = 1, height = 1 },
+        { class = "dropdown",  name  = "left_arrow_pos",     items = tail_pos_items,       value = cfg.left_arrow_pos, x = 1, y = 19, width = 1, height = 1 },
+        { class = "label",     label = "Left Curve (%):",    x = 2, y = 19, width = 1, height = 1 },
+        { class = "intedit",   name  = "left_arrow_curve",   value = cfg.left_arrow_curve, min = 0, max = 100, x = 3, y = 19, width = 1, height = 1 },
 
-        { class = "label",     label = "Left Width (px):",   x = 0, y = 19, width = 1, height = 1 },
-        { class = "floatedit", name  = "left_arrow_size",    value = cfg.left_arrow_size,  min = 1, max = 200, x = 1, y = 19, width = 1, height = 1 },
-        { class = "label",     label = "Left Height (px):",  x = 2, y = 19, width = 1, height = 1 },
-        { class = "floatedit", name  = "left_arrow_height",  value = cfg.left_arrow_height, min = 1, max = 200, x = 3, y = 19, width = 1, height = 1 },
+        { class = "label",     label = "Left Width (px):",   x = 0, y = 20, width = 1, height = 1 },
+        { class = "floatedit", name  = "left_arrow_size",    value = cfg.left_arrow_size,  min = 1, max = 200, x = 1, y = 20, width = 1, height = 1 },
+        { class = "label",     label = "Left Height (px):",  x = 2, y = 20, width = 1, height = 1 },
+        { class = "floatedit", name  = "left_arrow_height",  value = cfg.left_arrow_height, min = 1, max = 200, x = 3, y = 20, width = 1, height = 1 },
 
-        { class = "label",     label = "Left Curve Dir:",    x = 0, y = 20, width = 1, height = 1 },
-        { class = "dropdown",  name  = "left_arrow_dir",     items = tail_dir_items,       value = cfg.left_arrow_dir, x = 1, y = 20, width = 3, height = 1 },
+        { class = "label",     label = "Left Curve Dir:",    x = 0, y = 21, width = 1, height = 1 },
+        { class = "dropdown",  name  = "left_arrow_dir",     items = tail_dir_items,       value = cfg.left_arrow_dir, x = 1, y = 21, width = 3, height = 1 },
 
-        { class = "checkbox",  name  = "right_arrow_enable", label = "Right Tail",         value = cfg.right_arrow_enable, x = 0, y = 21, width = 1, height = 1 },
-        { class = "dropdown",  name  = "right_arrow_pos",    items = tail_pos_items,       value = cfg.right_arrow_pos, x = 1, y = 21, width = 1, height = 1 },
-        { class = "label",     label = "Right Curve (%):",   x = 2, y = 21, width = 1, height = 1 },
-        { class = "intedit",   name  = "right_arrow_curve",  value = cfg.right_arrow_curve, min = 0, max = 100, x = 3, y = 21, width = 1, height = 1 },
+        { class = "checkbox",  name  = "right_arrow_enable", label = "Right Tail",         value = cfg.right_arrow_enable, x = 0, y = 22, width = 1, height = 1 },
+        { class = "dropdown",  name  = "right_arrow_pos",    items = tail_pos_items,       value = cfg.right_arrow_pos, x = 1, y = 22, width = 1, height = 1 },
+        { class = "label",     label = "Right Curve (%):",   x = 2, y = 22, width = 1, height = 1 },
+        { class = "intedit",   name  = "right_arrow_curve",  value = cfg.right_arrow_curve, min = 0, max = 100, x = 3, y = 22, width = 1, height = 1 },
 
-        { class = "label",     label = "Right Width (px):",  x = 0, y = 22, width = 1, height = 1 },
-        { class = "floatedit", name  = "right_arrow_size",   value = cfg.right_arrow_size,  min = 1, max = 200, x = 1, y = 22, width = 1, height = 1 },
-        { class = "label",     label = "Right Height (px):", x = 2, y = 22, width = 1, height = 1 },
-        { class = "floatedit", name  = "right_arrow_height", value = cfg.right_arrow_height, min = 1, max = 200, x = 3, y = 22, width = 1, height = 1 },
+        { class = "label",     label = "Right Width (px):",  x = 0, y = 23, width = 1, height = 1 },
+        { class = "floatedit", name  = "right_arrow_size",   value = cfg.right_arrow_size,  min = 1, max = 200, x = 1, y = 23, width = 1, height = 1 },
+        { class = "label",     label = "Right Height (px):", x = 2, y = 23, width = 1, height = 1 },
+        { class = "floatedit", name  = "right_arrow_height", value = cfg.right_arrow_height, min = 1, max = 200, x = 3, y = 23, width = 1, height = 1 },
 
-        { class = "label",     label = "Right Curve Dir:",   x = 0, y = 23, width = 1, height = 1 },
-        { class = "dropdown",  name  = "right_arrow_dir",    items = tail_dir_items,       value = cfg.right_arrow_dir, x = 1, y = 23, width = 3, height = 1 }
+        { class = "label",     label = "Right Curve Dir:",   x = 0, y = 24, width = 1, height = 1 },
+        { class = "dropdown",  name  = "right_arrow_dir",    items = tail_dir_items,       value = cfg.right_arrow_dir, x = 1, y = 24, width = 3, height = 1 }
     }
 
     local btn, res = aegisub.dialog.display(dialog_config, { "Apply", "Cancel" })
@@ -1283,13 +1297,14 @@ local function run_phone_sign(sub, sel)
     end
     save_config(res)
 
-    local pad_x         = res.padding
-    local pad_y         = res.padding_y
-    local spacing       = res.spacing
-    local clip_margin   = res.clip_margin
-    local corner_radius = res.corner_radius
-    local avatar_target = res.avatar_size
-    local avatar_gap    = res.avatar_gap
+    local pad_x             = res.padding
+    local pad_y             = res.padding_y
+    local left_clip_margin  = res.left_clip_margin
+    local right_clip_margin = res.right_clip_margin
+    local spacing           = res.spacing
+    local corner_radius     = res.corner_radius
+    local avatar_target     = res.avatar_size
+    local avatar_gap        = res.avatar_gap
 
     local blur_tag      = (res.blur and res.blur > 0) and ([=[\blur]=] .. fmt(res.blur)) or ""
 
@@ -1444,7 +1459,7 @@ local function run_phone_sign(sub, sel)
 
     -- 7. Generate elements for all message lines (skipping attachment zones without empty balloons)
     local generated_lines = {}
-    local current_y = base.py or (area_top + clip_margin)
+    local current_y = base.py or (area_top + math.min(left_clip_margin, right_clip_margin))
 
     local UNAME_V_GAP = 4
     local UNAME_H_GAP = 8
@@ -1467,9 +1482,8 @@ local function run_phone_sign(sub, sel)
                 elseif inline_zone.has_left then
                     att_is_right = false
                 else
-                    -- Auto-detect side based on attachment horizontal center vs phone clip center
-                    local phone_l = edge_x_at_y(tl, bl, inline_zone.bottom)
-                    local phone_r = edge_x_at_y(tr, br, inline_zone.bottom)
+                    local phone_l   = edge_x_at_y(tl, bl, inline_zone.bottom)
+                    local phone_r   = edge_x_at_y(tr, br, inline_zone.bottom)
                     local phone_mid = (phone_l + phone_r) / 2
                     local att_mid   = (inline_zone.left + inline_zone.right) / 2
                     att_is_right = (att_mid >= phone_mid)
@@ -1627,8 +1641,8 @@ local function run_phone_sign(sub, sel)
 
             local raw_left   = edge_x_at_y(tl, bl, box_y)
             local raw_right  = edge_x_at_y(tr, br, box_y)
-            local left_edge  = raw_left + clip_margin
-            local right_edge = raw_right - clip_margin
+            local left_edge  = raw_left  + left_clip_margin
+            local right_edge = raw_right - right_clip_margin
 
             local av_x    = nil
             local uname_x = nil
@@ -1636,11 +1650,11 @@ local function run_phone_sign(sub, sel)
 
             if avatar_group and use_uname and res.username_mode == "Next to" then
                 local col_w    = math.max(av_w, uname_w)
-                local av_raw_l = edge_x_at_y(tl, bl, avatar_y) + clip_margin
-                local av_raw_r = edge_x_at_y(tr, br, avatar_y) - clip_margin
+                local av_raw_l = edge_x_at_y(tl, bl, avatar_y) + left_clip_margin
+                local av_raw_r = edge_x_at_y(tr, br, avatar_y) - right_clip_margin
 
-                local u_raw_l = edge_x_at_y(tl, bl, uname_y) + clip_margin
-                local u_raw_r = edge_x_at_y(tr, br, uname_y) - clip_margin
+                local u_raw_l = edge_x_at_y(tl, bl, uname_y) + left_clip_margin
+                local u_raw_r = edge_x_at_y(tr, br, uname_y) - right_clip_margin
 
                 if is_right then
                     av_x    = av_raw_r - col_w + (col_w - av_w) / 2
@@ -1653,14 +1667,14 @@ local function run_phone_sign(sub, sel)
                 end
             else
                 if avatar_group then
-                    local av_left_edge  = edge_x_at_y(tl, bl, avatar_y) + clip_margin
-                    local av_right_edge = edge_x_at_y(tr, br, avatar_y) - clip_margin
+                    local av_left_edge  = edge_x_at_y(tl, bl, avatar_y) + left_clip_margin
+                    local av_right_edge = edge_x_at_y(tr, br, avatar_y) - right_clip_margin
                     av_x = is_right and (av_right_edge - av_w) or av_left_edge
                 end
 
                 if use_uname and res.username_mode == "Above" then
-                    local u_left  = edge_x_at_y(tl, bl, uname_y) + clip_margin + av_shift + tail_offset
-                    local u_right = edge_x_at_y(tr, br, uname_y) - clip_margin - av_shift - tail_offset
+                    local u_left  = edge_x_at_y(tl, bl, uname_y) + left_clip_margin  + av_shift + tail_offset
+                    local u_right = edge_x_at_y(tr, br, uname_y) - right_clip_margin - av_shift - tail_offset
                     uname_x = is_right and (u_right - uname_w) or u_left
                     if is_right then
                         box_x = math.max(left_edge, right_edge - av_shift - tail_offset - box_w)
