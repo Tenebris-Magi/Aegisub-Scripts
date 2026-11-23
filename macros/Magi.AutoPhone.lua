@@ -1,7 +1,7 @@
 script_name = "AutoPhone"
-script_description = "Automates positioned phone chat signs with perspective-matched bubbles, customizable seamless balloon tails, usernames, read indicators, multi-line avatars, and optional auto-wrapping."
+script_description = "Automates positioned phone chat signs with perspective-matched bubbles, customizable seamless balloon tails, usernames, read indicators, multi-line avatars, embed photo skipping, and optional auto-wrapping."
 script_author = "Magi"
-script_version = "0.5.0"
+script_version = "0.6.0"
 script_namespace = "Magi.AutoPhone"
 
 local haveDepCtrl, DependencyControl, depRec = pcall(require, "l0.DependencyControl")
@@ -157,9 +157,10 @@ local function get_layout_res_y(sub, fallback_res_y)
 end
 
 -- ============================================================================
--- ASS Tag, Effect, Read & Multi-Line Avatar Parsing
+-- ASS Tag, Clip, Effect, Read & Multi-Line Avatar Parsing
 -- ============================================================================
 
+-- Extract the 4-point vector clip coordinates from Line 1
 local function extract_clip_points(text)
     local clip_content = text:match([=[\i?clip%(([^%)]+)%)]=])
     if not clip_content then
@@ -195,6 +196,62 @@ local function extract_clip_points(text)
         return nil
     end
     return { pts[1], pts[2], pts[3], pts[4] }
+end
+
+-- Extract clip points from an Embed Photo line (supports BOTH rectangular and vectorial clips)
+local function extract_any_clip_points(text)
+    local clip_content = text:match([=[\i?clip%(([^%)]+)%)]=])
+    if not clip_content then
+        return nil
+    end
+
+    -- Check for vectorial clip first (contains 'm' or 'M')
+    if clip_content:find("[mM]") then
+        local scale = 1
+        local scale_str, rest = clip_content:match("^%s*(%d+)%s*,%s*(.+)$")
+        if scale_str and rest then
+            local s = tonumber(scale_str)
+            if s and s > 1 then
+                scale = 2 ^ (s - 1)
+            end
+            clip_content = rest
+        end
+
+        local draw_part = clip_content:match("[mM].*")
+        if not draw_part then
+            return nil
+        end
+
+        local nums = {}
+        for num in draw_part:gmatch("[%-]?%d+%.?%d*") do
+            table.insert(nums, tonumber(num) / scale)
+        end
+
+        local pts = {}
+        for i = 1, #nums - 1, 2 do
+            table.insert(pts, { x = nums[i], y = nums[i + 1] })
+        end
+        if #pts >= 2 then
+            return pts
+        end
+        return nil
+    end
+
+    -- Otherwise parse rectangular clip: \clip(x1, y1, x2, y2)
+    local nums = {}
+    for num in clip_content:gmatch("[%-]?%d+%.?%d*") do
+        table.insert(nums, tonumber(num))
+    end
+    if #nums >= 4 then
+        local x1, y1, x2, y2 = nums[1], nums[2], nums[3], nums[4]
+        return {
+            { x = x1, y = y1 },
+            { x = x2, y = y1 },
+            { x = x2, y = y2 },
+            { x = x1, y = y2 }
+        }
+    end
+    return nil
 end
 
 local function extract_base_tags(text, style)
@@ -263,9 +320,14 @@ local function anchor_y_to_top(py, an, block_h)
     return py
 end
 
+-- Effect parser:
+--   - "Read"   -> Read template line
+--   - "Avatar" -> Avatar drawing template line (matched to messages via Actor field)
+--   - "Photo" / "Image" / "Embed" / "Skip" -> Embed photo clip skip line
+--   - "Left", "Right", "Left Read", "Right Read" (any order) -> Message lines
 local function parse_effect(eff_raw)
     local eff = trim(eff_raw):lower()
-    local has_left, has_right, has_read, has_avatar = false, false, false, false
+    local has_left, has_right, has_read, has_avatar, has_photo = false, false, false, false, false
 
     for tok in eff:gmatch("[^%s,]+") do
         if tok == "left" or tok == "l" then
@@ -276,23 +338,29 @@ local function parse_effect(eff_raw)
             has_read = true
         elseif tok == "avatar" then
             has_avatar = true
+        elseif tok == "photo" or tok == "image" or tok == "embed" or tok == "skip" then
+            has_photo = true
         end
     end
 
-    if has_read and (not has_left) and (not has_right) and (not has_avatar) then
+    if has_read and (not has_left) and (not has_right) and (not has_avatar) and (not has_photo) then
         return { is_read_template = true }
     end
 
-    if has_avatar and (not has_left) and (not has_right) and (not has_read) then
+    if has_avatar and (not has_left) and (not has_right) and (not has_read) and (not has_photo) then
         return { is_avatar_template = true }
+    end
+
+    if has_photo and (not has_left) and (not has_right) then
+        return { is_photo_skip = true }
     end
 
     return {
         is_read_template   = false,
         is_avatar_template = false,
+        is_photo_skip      = false,
         is_right           = has_right,
-        has_read           = has_read,
-        has_avatar         = has_avatar
+        has_read           = has_read
     }
 end
 
@@ -1039,7 +1107,7 @@ local function show_dialog(cfg)
         { class = "intedit",  name  = "username_size_pct", value = cfg.username_size_pct, min = 10, max = 200, x = 1, y = 9, width = 1, height = 1 },
 
         -- Read Indicator & Avatar
-        { class = "label",     label = "─── Read & Avatar (Effect: Read / Avatar) ───", x = 0, y = 10, width = 4, height = 1 },
+        { class = "label",     label = "─── Read & Avatar (Avatar matched via Actor) ───", x = 0, y = 10, width = 4, height = 1 },
         { class = "label",     label = "Read Color:",       x = 0, y = 11, width = 1, height = 1 },
         { class = "color",     name  = "read_color",        value = cfg.read_color, x = 1, y = 11, width = 1, height = 1 },
         { class = "label",     label = "Read Size (%):",    x = 2, y = 11, width = 1, height = 1 },
@@ -1128,10 +1196,9 @@ local function run_phone_sign(sub, sel)
     end
 
     -- 2. Scan selected lines for "Read" and "Avatar" template lines
-    local read_template = nil
-    local default_avatar_raw = {}
-    local actor_avatars_raw  = {}
-    local first_actor_key    = nil
+    --    Avatars are strictly keyed by their Actor (username) field.
+    local read_template     = nil
+    local actor_avatars_raw = {}
 
     for _, line_num in ipairs(sel) do
         local line = sub[line_num]
@@ -1140,12 +1207,9 @@ local function run_phone_sign(sub, sel)
             read_template = parse_read_template(line.text)
         elseif info.is_avatar_template then
             local akey = trim(line.actor):lower()
-            if akey == "" then
-                table.insert(default_avatar_raw, line)
-            else
+            if akey ~= "" then
                 if not actor_avatars_raw[akey] then
                     actor_avatars_raw[akey] = {}
-                    if not first_actor_key then first_actor_key = akey end
                 end
                 table.insert(actor_avatars_raw[akey], line)
             end
@@ -1160,20 +1224,18 @@ local function run_phone_sign(sub, sel)
         }
     end
 
-    -- Compile multi-line avatars
-    local default_avatar = compile_avatar_group(default_avatar_raw)
-    local actor_avatars  = {}
+    -- Compile multi-line avatars per Actor username
+    local actor_avatars = {}
     for akey, raw_list in pairs(actor_avatars_raw) do
         actor_avatars[akey] = compile_avatar_group(raw_list)
     end
-    local fallback_avatar = default_avatar or (first_actor_key and actor_avatars[first_actor_key] or nil)
 
     local function resolve_avatar(actor_str)
         local akey = trim(actor_str):lower()
         if akey ~= "" and actor_avatars[akey] then
             return actor_avatars[akey]
         end
-        return fallback_avatar
+        return nil
     end
 
     -- 3. Show GUI with remembered settings
@@ -1270,7 +1332,7 @@ local function run_phone_sign(sub, sel)
     local read_txt_scale   = string.format([=[\fscx%s\fscy%s]=], fmt(base.fscx * read_scale), fmt(base.fscy * read_scale))
     local read_shp_scale   = string.format([=[\fscx%s\fscy%s]=], fmt(res.read_size_pct), fmt(res.read_size_pct))
 
-    -- 7. Generate elements for all message lines
+    -- 7. Generate elements for all message lines (and skip embed photo clips)
     local generated_lines = {}
     local current_y = base.py or (area_top + clip_margin)
 
@@ -1284,10 +1346,31 @@ local function run_phone_sign(sub, sel)
         local clean_text = trim(orig.text:gsub("{[^}]*}", ""))
 
         local is_template = eff_info.is_read_template or eff_info.is_avatar_template
-        if (not is_template) and (not (idx == 1 and clean_text == "")) then
-            local is_right   = eff_info.is_right
-            local has_read   = eff_info.has_read
-            local has_avatar = eff_info.has_avatar
+        local photo_pts = nil
+        if (not is_template) and idx > 1 then
+            if eff_info.is_photo_skip then
+                photo_pts = extract_any_clip_points(orig.text)
+            elseif clean_text == "" then
+                photo_pts = extract_any_clip_points(orig.text)
+            end
+        end
+
+        if photo_pts then
+            -- Embed Photo skip line: project all clip points onto the 3D phone plane
+            -- and advance current_y past the bottom edge of the embedded photo
+            local max_ly = -math.huge
+            for _, pt in ipairs(photo_pts) do
+                local _, ly = screen_to_local(pt.x, pt.y, ox, oy, base.frx, base.fry, base.frz, focal_d)
+                if ly > max_ly then
+                    max_ly = ly
+                end
+            end
+            if max_ly > -math.huge then
+                current_y = math.max(current_y, max_ly + spacing)
+            end
+        elseif (not is_template) and (not eff_info.is_photo_skip) and (not (idx == 1 and clean_text == "")) then
+            local is_right = eff_info.is_right
+            local has_read = eff_info.has_read
 
             local tail_enable = is_right and res.right_arrow_enable or res.left_arrow_enable
             local tail_w      = is_right and res.right_arrow_size   or res.left_arrow_size
@@ -1304,8 +1387,8 @@ local function run_phone_sign(sub, sel)
                 uname_norm, uname_w, uname_h = format_and_measure_text(actor_name, uname_style, false, nil)
             end
 
-            -- Resolve multi-line avatar if requested on this line
-            local avatar_group = has_avatar and resolve_avatar(actor_name) or nil
+            -- Trigger avatar strictly by matching Actor username (works even if Username display is Off)
+            local avatar_group = resolve_avatar(actor_name)
             local av_scale, av_w, av_h, av_shift = 1, 0, 0, 0
             if avatar_group then
                 av_scale = avatar_target / math.max(avatar_group.width, avatar_group.height)
@@ -1408,7 +1491,6 @@ local function run_phone_sign(sub, sel)
                     box_x   = left_edge + col_w + avatar_gap + tail_offset
                 end
             else
-                -- Standard Avatar horizontal position (if present)
                 if avatar_group then
                     local av_left_edge  = edge_x_at_y(tl, bl, avatar_y) + clip_margin
                     local av_right_edge = edge_x_at_y(tr, br, avatar_y) - clip_margin
@@ -1425,7 +1507,6 @@ local function run_phone_sign(sub, sel)
                         box_x = left_edge + av_shift + tail_offset
                     end
                 elseif use_uname and res.username_mode == "Next to" then
-                    -- No avatar on this line: username sits next to the bubble
                     uname_y = box_y
                     if is_right then
                         uname_x = right_edge - uname_w
@@ -1546,7 +1627,7 @@ local function run_phone_sign(sub, sel)
         end
     end
 
-    -- 8. Replace original selected lines (deletes Line 1 clip, Read, and Avatar template lines)
+    -- 8. Replace original selected lines (deletes Line 1 clip, Read, Avatar, and Embed Photo lines)
     local insert_pos = sel[1]
     for i = #sel, 1, -1 do
         sub.delete(sel[i])
